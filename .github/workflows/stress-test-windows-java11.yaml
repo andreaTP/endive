@@ -1,0 +1,41 @@
+name: Stress Test - Windows Java 11
+
+on:
+  push:
+    branches: [ extend-jit-workaround-i32-lt-u ]
+  pull_request:
+
+jobs:
+  stress-test:
+    name: Windows Java 11 - Run ${{ matrix.run }}
+    runs-on: windows-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v7
+      - name: Checkout testsuite
+        uses: actions/checkout@v7
+        with:
+          repository: WebAssembly/testsuite
+          path: testsuite
+          ref: 88e97b0f742f4c3ee01fea683da130f344dd7b02
+      - name: Checkout wasi-testsuite
+        uses: actions/checkout@v7
+        with:
+          repository: WebAssembly/wasi-testsuite
+          path: wasi-testsuite
+          ref: prod/testsuite-base
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+          cache: maven
+      - name: Test Java
+        run: mvn -B clean install
+        env:
+          MAVEN_OPTS: "-ea"

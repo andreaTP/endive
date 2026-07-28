@@ -48,6 +48,7 @@ public final class ShadedRefs {
     static final Method MEMORY_ATOMIC_LONG_INT_READ;
     static final Method MEMORY_ATOMIC_LONG_READ;
     static final Method I32_GE_U;
+    static final Method I32_LT_U;
     static final Method REF_IS_NULL;
     static final Method REF_AS_NON_NULL;
     static final Method TABLE_GET;
@@ -263,6 +264,7 @@ public final class ShadedRefs {
                     Shaded.class.getMethod(
                             "memoryAtomicLongIntRead", int.class, int.class, Memory.class);
             I32_GE_U = Shaded.class.getMethod("i32_ge_u", int.class, int.class);
+            I32_LT_U = Shaded.class.getMethod("i32_lt_u", int.class, int.class);
             REF_IS_NULL = Shaded.class.getMethod("isRefNull", int.class);
             REF_AS_NON_NULL = Shaded.class.getMethod("refAsNonNull", int.class);
             TABLE_GET = Shaded.class.getMethod("tableGet", int.class, int.class, Instance.class);
