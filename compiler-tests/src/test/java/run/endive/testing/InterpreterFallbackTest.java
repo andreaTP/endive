@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static run.endive.corpus.WatGenerator.methodTooLarge;
+import static run.endive.corpus.WatGenerator.methodTooLargeWithMemoryImport;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -28,7 +29,9 @@ import org.junit.jupiter.api.Test;
 import run.endive.build.time.compiler.Config;
 import run.endive.build.time.compiler.Generator;
 import run.endive.compiler.InterpreterFallback;
+import run.endive.runtime.ByteBufferMemory;
 import run.endive.runtime.HostFunction;
+import run.endive.runtime.ImportMemory;
 import run.endive.runtime.ImportValues;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Machine;
@@ -37,6 +40,7 @@ import run.endive.wasm.Parser;
 import run.endive.wasm.WasmEngineException;
 import run.endive.wasm.WasmModule;
 import run.endive.wasm.types.FunctionType;
+import run.endive.wasm.types.MemoryLimits;
 import run.endive.wasm.types.ValType;
 
 public class InterpreterFallbackTest {
@@ -215,6 +219,60 @@ public class InterpreterFallbackTest {
 
         var output = captureOutput(() -> generateAll(generator));
         assertEquals("", output);
+    }
+
+    @Test
+    public void testInterpreterFallbackWithMemoryImport() throws Exception {
+        Path srcDir = Path.of("target", "test-fixtures-mem", "src");
+        Files.createDirectories(srcDir);
+        Path memClassDir = Path.of("target", "test-fixtures-mem", "classes");
+        Files.createDirectories(memClassDir);
+
+        String wat = methodTooLargeWithMemoryImport(20_000);
+        var wasm = Wat2Wasm.parse(wat);
+        var memWasmFile = srcDir.resolve("main.wasm");
+        Files.write(memWasmFile, wasm);
+
+        var config =
+                Config.builder()
+                        .withWasmFile(memWasmFile)
+                        .withTargetSourceFolder(memClassDir)
+                        .withTargetClassFolder(memClassDir)
+                        .withTargetWasmFolder(memClassDir)
+                        .withName("run.endive.testing.TestMem")
+                        .withInterpreterFallback(InterpreterFallback.SILENT)
+                        .build();
+        var generator = new Generator(config);
+        generator.generateSources();
+        var interpretedFunctions = generator.generateResources();
+        generator.generateMetaWasm(interpretedFunctions);
+
+        var url = memClassDir.toUri().toURL();
+        var cl = new URLClassLoader(new URL[] {url});
+        var machineClass = cl.loadClass("run.endive.testing.TestMemMachine");
+        Function<Instance, Machine> machineFactory = createMachineFactory(machineClass);
+
+        var hostStackTrace = new ArrayList<String>();
+        var hostFunc = createHostFunc(hostStackTrace);
+
+        WasmModule module;
+        try (InputStream in = machineClass.getResourceAsStream("TestMem.meta")) {
+            module = Parser.parse(in);
+        }
+
+        var memory = new ByteBufferMemory(new MemoryLimits(1));
+        var instance =
+                Instance.builder(module)
+                        .withImportValues(
+                                ImportValues.builder()
+                                        .addFunction(hostFunc)
+                                        .addMemory(new ImportMemory("env", "memory", memory))
+                                        .build())
+                        .withMachineFactory(machineFactory)
+                        .withStart(false)
+                        .build();
+
+        assertEquals(35, instance.export("func_2").apply(0)[0]);
     }
 
     private static HostFunction createHostFunc(List<String> hostStackTrace) {
