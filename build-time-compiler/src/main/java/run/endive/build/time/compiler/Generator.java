@@ -43,6 +43,7 @@ import run.endive.runtime.Machine;
 import run.endive.wasm.Parser;
 import run.endive.wasm.WasmModule;
 import run.endive.wasm.WasmWriter;
+import run.endive.wasm.types.ExternalType;
 import run.endive.wasm.types.OpCode;
 import run.endive.wasm.types.RawSection;
 import run.endive.wasm.types.SectionId;
@@ -150,7 +151,7 @@ public class Generator {
                         var source = ByteBuffer.wrap(((RawSection) section).contents());
 
                         var out = new ByteArrayOutputStream();
-                        var importFuncs = module.importSection().importCount();
+                        var importFuncs = module.importSection().count(ExternalType.FUNCTION);
                         int count = module.codeSection().functionBodyCount();
                         writeVarUInt32(out, count);
                         var actual = readVarUInt32(source);

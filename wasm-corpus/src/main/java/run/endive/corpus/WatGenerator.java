@@ -34,6 +34,17 @@ public final class WatGenerator {
                         "instructions", instructions));
     }
 
+    public static String methodTooLargeWithMemoryImport(int funcSize) {
+        ArrayList<Integer> instructions = new ArrayList<>();
+        for (int i = 0; i < funcSize; i++) {
+            instructions.add(i + 1);
+        }
+
+        return render(
+                "/run/endive/corpus/method_too_large_with_memory_import.wat",
+                Map.of("instructions", instructions));
+    }
+
     public static String methodTooLarge(int funcSize) {
         ArrayList<Integer> instructions = new ArrayList<>();
         for (int i = 0; i < funcSize; i++) {
