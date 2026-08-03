@@ -891,11 +891,98 @@ final class WasmAnalyzer {
                         max = Math.max(max, slots);
                         break;
                     }
+                case STRUCT_NEW:
+                    {
+                        var st =
+                                module.typeSection()
+                                        .getSubType((int) ins.operand(0))
+                                        .compType()
+                                        .structType();
+                        int slots = 0;
+                        for (var ft : st.fieldTypes()) {
+                            if (ft.storageType().valType() != null) {
+                                slots += slotCount(ft.storageType().valType().id());
+                            } else {
+                                slots += 1;
+                            }
+                        }
+                        max = Math.max(max, slots);
+                        break;
+                    }
+                case THROW:
+                    {
+                        var tagType = resolveTagType((int) ins.operand(0));
+                        if (tagType != null && !tagType.params().isEmpty()) {
+                            int slots =
+                                    tagType.params().stream()
+                                            .mapToInt(CompilerUtil::slotCount)
+                                            .sum();
+                            max = Math.max(max, slots);
+                        }
+                        break;
+                    }
+                case ARRAY_NEW_FIXED:
+                    {
+                        int len = (int) ins.operand(1);
+                        var at =
+                                module.typeSection()
+                                        .getSubType((int) ins.operand(0))
+                                        .compType()
+                                        .arrayType();
+                        if (at.fieldType().storageType().isObjectRef()) {
+                            max = Math.max(max, len);
+                        } else {
+                            int elemSlots;
+                            if (at.fieldType().storageType().valType() != null) {
+                                elemSlots = slotCount(at.fieldType().storageType().valType().id());
+                            } else {
+                                elemSlots = 1;
+                            }
+                            max = Math.max(max, len * elemSlots);
+                        }
+                        break;
+                    }
+                case CALL:
+                    {
+                        var calleeType = functionTypes.get((int) ins.operand(0));
+                        if (hasTooManyParameters(calleeType)) {
+                            int slots =
+                                    calleeType.params().stream()
+                                            .mapToInt(CompilerUtil::slotCount)
+                                            .sum();
+                            max = Math.max(max, slots);
+                        }
+                        break;
+                    }
                 default:
                     break;
             }
         }
         return max;
+    }
+
+    private FunctionType resolveTagType(int tagIdx) {
+        int tagImportCount = module.importSection().count(ExternalType.TAG);
+        int typeIndex;
+        if (tagIdx < tagImportCount) {
+            int seen = 0;
+            for (int i = 0; i < module.importSection().importCount(); i++) {
+                var imp = module.importSection().getImport(i);
+                if (imp.importType() == ExternalType.TAG) {
+                    if (seen == tagIdx) {
+                        typeIndex = ((run.endive.wasm.types.TagImport) imp).tagType().typeIdx();
+                        return module.typeSection().getType(typeIndex);
+                    }
+                    seen++;
+                }
+            }
+            return null;
+        } else if (module.tagSection().isPresent()) {
+            typeIndex = module.tagSection().get().getTag(tagIdx - tagImportCount).typeIdx();
+        } else {
+            return null;
+        }
+        return module.typeSection().getType(typeIndex);
     }
 
     private static void analyzeTryCatchEnd(
