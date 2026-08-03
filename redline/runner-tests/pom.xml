@@ -46,11 +46,6 @@
     </dependency>
     <dependency>
       <groupId>run.endive</groupId>
-      <artifactId>redline-runner-jffi-experimental</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>run.endive</groupId>
       <artifactId>runtime</artifactId>
       <scope>test</scope>
     </dependency>
