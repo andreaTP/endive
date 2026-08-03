@@ -3,7 +3,6 @@ package run.endive.compiler.internal;
 import static java.util.Collections.reverse;
 import static java.util.stream.Collectors.toCollection;
 import static java.util.stream.Collectors.toUnmodifiableList;
-import static run.endive.compiler.internal.CompilerUtil.hasTooManyParameters;
 import static run.endive.compiler.internal.CompilerUtil.localType;
 import static run.endive.compiler.internal.CompilerUtil.slotCount;
 import static run.endive.compiler.internal.TypeStack.FUNCTION_SCOPE;
@@ -798,191 +797,21 @@ final class WasmAnalyzer {
         reverse(tryCatchBlockInstructions);
         result.addAll(0, tryCatchBlockInstructions);
 
-        return new AnalysisResult(result, computeMaxTempSlots(result));
+        return new AnalysisResult(
+                result, computeMaxTempSlots(result, EmitterMap.TEMP_SLOT_CALCULATORS));
     }
 
-    private int computeMaxTempSlots(List<CompilerInstruction> instructions) {
+    private int computeMaxTempSlots(
+            List<CompilerInstruction> instructions,
+            Map<CompilerOpCode, Emitters.TempSlotCalculator> calculators) {
         int max = 0;
         for (var ins : instructions) {
-            switch (ins.opcode()) {
-                case DROP_KEEP:
-                    {
-                        // keep values are stored starting at tempSlot
-                        int keepStart = (int) ins.operand(0) + 1;
-                        int slots = 0;
-                        for (int i = keepStart; i < ins.operandCount(); i++) {
-                            slots += slotCount(ins.operand(i));
-                        }
-                        max = Math.max(max, slots);
-                        break;
-                    }
-                case TRY_SAVE_STACK:
-                    {
-                        // above-try values (block params) are stored at tempSlot
-                        int belowCount = (int) ins.operand(1);
-                        int totalCount = ins.operandCount() - 2;
-                        int slots = 0;
-                        for (int i = belowCount; i < totalCount; i++) {
-                            slots += slotCount(ins.operand(i + 2));
-                        }
-                        max = Math.max(max, slots);
-                        break;
-                    }
-                case CATCH_START:
-                    // exception ref (1 slot) + potential array ref in CATCH_UNBOX_PARAMS (1 slot)
-                    max = Math.max(max, 2);
-                    break;
-                case CALL_INDIRECT:
-                    {
-                        // 1 slot always; more if hasTooManyParameters
-                        var type = module.typeSection().getType((int) ins.operand(0));
-                        if (hasTooManyParameters(type)) {
-                            max =
-                                    Math.max(
-                                            max,
-                                            type.params().stream()
-                                                    .mapToInt(CompilerUtil::slotCount)
-                                                    .sum());
-                        }
-                        break;
-                    }
-                case CALL_REF:
-                    {
-                        // 1 slot for funcref; more if hasTooManyParameters
-                        var type = module.typeSection().getType((int) ins.operand(0));
-                        int slots = 1;
-                        if (hasTooManyParameters(type)) {
-                            slots =
-                                    Math.max(
-                                            slots,
-                                            type.params().stream()
-                                                    .mapToInt(CompilerUtil::slotCount)
-                                                    .sum());
-                        }
-                        max = Math.max(max, slots);
-                        break;
-                    }
-                case RETURN_CALL_INDIRECT:
-                    {
-                        // paramSlots for boxing + 1 for funcTableIdx saved beyond boxing area
-                        var type = module.typeSection().getType((int) ins.operand(0));
-                        int slots =
-                                type.params().stream().mapToInt(CompilerUtil::slotCount).sum() + 1;
-                        max = Math.max(max, slots);
-                        break;
-                    }
-                case RETURN_CALL_REF:
-                    {
-                        // paramSlots for boxing + 1 for funcref saved beyond boxing area
-                        var type = module.typeSection().getType((int) ins.operand(0));
-                        int slots =
-                                type.params().stream().mapToInt(CompilerUtil::slotCount).sum() + 1;
-                        max = Math.max(max, slots);
-                        break;
-                    }
-                case RETURN_CALL:
-                    {
-                        // paramSlots for boxing
-                        var calleeType = functionTypes.get((int) ins.operand(0));
-                        int slots =
-                                calleeType.params().stream()
-                                        .mapToInt(CompilerUtil::slotCount)
-                                        .sum();
-                        max = Math.max(max, slots);
-                        break;
-                    }
-                case STRUCT_NEW:
-                    {
-                        var st =
-                                module.typeSection()
-                                        .getSubType((int) ins.operand(0))
-                                        .compType()
-                                        .structType();
-                        int slots = 0;
-                        for (var ft : st.fieldTypes()) {
-                            if (ft.storageType().valType() != null) {
-                                slots += slotCount(ft.storageType().valType().id());
-                            } else {
-                                slots += 1;
-                            }
-                        }
-                        max = Math.max(max, slots);
-                        break;
-                    }
-                case THROW:
-                    {
-                        var tagType = resolveTagType((int) ins.operand(0));
-                        if (tagType != null && !tagType.params().isEmpty()) {
-                            int slots =
-                                    tagType.params().stream()
-                                            .mapToInt(CompilerUtil::slotCount)
-                                            .sum();
-                            max = Math.max(max, slots);
-                        }
-                        break;
-                    }
-                case ARRAY_NEW_FIXED:
-                    {
-                        int len = (int) ins.operand(1);
-                        var at =
-                                module.typeSection()
-                                        .getSubType((int) ins.operand(0))
-                                        .compType()
-                                        .arrayType();
-                        if (at.fieldType().storageType().isObjectRef()) {
-                            max = Math.max(max, len);
-                        } else {
-                            int elemSlots;
-                            if (at.fieldType().storageType().valType() != null) {
-                                elemSlots = slotCount(at.fieldType().storageType().valType().id());
-                            } else {
-                                elemSlots = 1;
-                            }
-                            max = Math.max(max, len * elemSlots);
-                        }
-                        break;
-                    }
-                case CALL:
-                    {
-                        var calleeType = functionTypes.get((int) ins.operand(0));
-                        if (hasTooManyParameters(calleeType)) {
-                            int slots =
-                                    calleeType.params().stream()
-                                            .mapToInt(CompilerUtil::slotCount)
-                                            .sum();
-                            max = Math.max(max, slots);
-                        }
-                        break;
-                    }
-                default:
-                    break;
+            var calc = calculators.get(ins.opcode());
+            if (calc != null) {
+                max = Math.max(max, calc.maxTempSlots(ins, module));
             }
         }
         return max;
-    }
-
-    private FunctionType resolveTagType(int tagIdx) {
-        int tagImportCount = module.importSection().count(ExternalType.TAG);
-        int typeIndex;
-        if (tagIdx < tagImportCount) {
-            int seen = 0;
-            for (int i = 0; i < module.importSection().importCount(); i++) {
-                var imp = module.importSection().getImport(i);
-                if (imp.importType() == ExternalType.TAG) {
-                    if (seen == tagIdx) {
-                        typeIndex = ((run.endive.wasm.types.TagImport) imp).tagType().typeIdx();
-                        return module.typeSection().getType(typeIndex);
-                    }
-                    seen++;
-                }
-            }
-            return null;
-        } else if (module.tagSection().isPresent()) {
-            typeIndex = module.tagSection().get().getTag(tagIdx - tagImportCount).typeIdx();
-        } else {
-            return null;
-        }
-        return module.typeSection().getType(typeIndex);
     }
 
     private static void analyzeTryCatchEnd(
