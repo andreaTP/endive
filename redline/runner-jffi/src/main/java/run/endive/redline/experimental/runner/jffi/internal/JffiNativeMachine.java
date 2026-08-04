@@ -28,7 +28,7 @@ import run.endive.wasm.types.ValType;
 import run.endive.wasm.types.Value;
 
 /**
- * Machine implementation that compiles Wasm functions to native x86_64
+ * Machine implementation that compiles Wasm functions to native code
  * via Cranelift and executes them through jffi.
  *
  * <p>Calling convention for all compiled functions:

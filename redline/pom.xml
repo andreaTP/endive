@@ -42,7 +42,6 @@
       </activation>
       <modules>
         <module>runner</module>
-        <module>runner-jffi</module>
       </modules>
     </profile>
   </profiles>

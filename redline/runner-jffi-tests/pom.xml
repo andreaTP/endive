@@ -14,7 +14,6 @@
   <description>Spec tests for the Redline native runner</description>
 
   <properties>
-    <!-- Java 11 -->
     <maven.deploy.skip>true</maven.deploy.skip>
   </properties>
 

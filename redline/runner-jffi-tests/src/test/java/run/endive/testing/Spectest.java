@@ -4,7 +4,6 @@ import static run.endive.wasm.types.Value.REF_NULL_VALUE;
 
 import java.util.List;
 import run.endive.redline.experimental.runner.jffi.JffiNativeMachineFactory;
-import run.endive.runtime.GlobalInstance;
 import run.endive.runtime.HostFunction;
 import run.endive.runtime.ImportGlobal;
 import run.endive.runtime.ImportMemory;
@@ -14,6 +13,7 @@ import run.endive.runtime.Instance;
 import run.endive.runtime.WasmFunctionHandle;
 import run.endive.wasm.types.FunctionType;
 import run.endive.wasm.types.MemoryLimits;
+import run.endive.wasm.types.MutabilityType;
 import run.endive.wasm.types.Table;
 import run.endive.wasm.types.TableLimits;
 import run.endive.wasm.types.ValType;
@@ -91,22 +91,30 @@ public final class Spectest {
                         new ImportGlobal(
                                 "spectest",
                                 "global_i32",
-                                GlobalInstance.builder().value(Value.i32(666)).build()))
+                                JffiNativeMachineFactory.createImportGlobal(
+                                        Value.i32(666).raw(), ValType.I32, MutabilityType.Const)))
                 .addGlobal(
                         new ImportGlobal(
                                 "spectest",
                                 "global_i64",
-                                GlobalInstance.builder().value(Value.i64(666)).build()))
+                                JffiNativeMachineFactory.createImportGlobal(
+                                        Value.i64(666).raw(), ValType.I64, MutabilityType.Const)))
                 .addGlobal(
                         new ImportGlobal(
                                 "spectest",
                                 "global_f32",
-                                GlobalInstance.builder().value(Value.fromFloat(666.6f)).build()))
+                                JffiNativeMachineFactory.createImportGlobal(
+                                        Value.fromFloat(666.6f).raw(),
+                                        ValType.F32,
+                                        MutabilityType.Const)))
                 .addGlobal(
                         new ImportGlobal(
                                 "spectest",
                                 "global_f64",
-                                GlobalInstance.builder().value(Value.fromDouble(666.6)).build()))
+                                JffiNativeMachineFactory.createImportGlobal(
+                                        Value.fromDouble(666.6).raw(),
+                                        ValType.F64,
+                                        MutabilityType.Const)))
                 .addMemory(
                         new ImportMemory(
                                 "spectest",

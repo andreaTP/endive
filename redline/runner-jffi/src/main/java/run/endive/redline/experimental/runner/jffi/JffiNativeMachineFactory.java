@@ -77,6 +77,12 @@ public final class JffiNativeMachineFactory {
                 globalsBufferAddr, globalIndex++, value, type, mutability);
     }
 
+    public static GlobalInstance createImportGlobal(
+            long value, ValType type, MutabilityType mutability) {
+        long addr = MEM.allocateMemory(8, true);
+        return new JffiNativeGlobalInstance(addr, 0, value, type, mutability);
+    }
+
     public static Memory createMemory(MemoryLimits limits) {
         return new JffiNativeMemory(limits);
     }
