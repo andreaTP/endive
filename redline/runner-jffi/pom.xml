@@ -8,12 +8,24 @@
     <version>999-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
-  <artifactId>redline-api-experimental</artifactId>
+  <artifactId>redline-runner-jffi-experimental</artifactId>
   <packaging>jar</packaging>
-  <name>Endive - Redline API</name>
-  <description>Redline native compiler API</description>
+  <name>Endive - Redline Runner JFFI</name>
+  <description>Native code execution via JFFI (Java 11+)</description>
 
   <dependencies>
+    <dependency>
+      <groupId>com.github.jnr</groupId>
+      <artifactId>jffi</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>run.endive</groupId>
+      <artifactId>redline-api-experimental</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>run.endive</groupId>
+      <artifactId>redline-bridge-experimental</artifactId>
+    </dependency>
     <dependency>
       <groupId>run.endive</groupId>
       <artifactId>runtime</artifactId>
@@ -21,6 +33,12 @@
     <dependency>
       <groupId>run.endive</groupId>
       <artifactId>wasm</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.github.jnr</groupId>
+      <artifactId>jffi</artifactId>
+      <classifier>native</classifier>
+      <scope>runtime</scope>
     </dependency>
   </dependencies>
 </project>

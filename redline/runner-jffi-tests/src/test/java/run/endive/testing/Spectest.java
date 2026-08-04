@@ -3,7 +3,7 @@ package run.endive.testing;
 import static run.endive.wasm.types.Value.REF_NULL_VALUE;
 
 import java.util.List;
-import run.endive.redline.experimental.runner.NativeMachineFactory;
+import run.endive.redline.experimental.runner.jffi.JffiNativeMachineFactory;
 import run.endive.runtime.HostFunction;
 import run.endive.runtime.ImportGlobal;
 import run.endive.runtime.ImportMemory;
@@ -91,19 +91,19 @@ public final class Spectest {
                         new ImportGlobal(
                                 "spectest",
                                 "global_i32",
-                                NativeMachineFactory.createImportGlobal(
+                                JffiNativeMachineFactory.createImportGlobal(
                                         Value.i32(666).raw(), ValType.I32, MutabilityType.Const)))
                 .addGlobal(
                         new ImportGlobal(
                                 "spectest",
                                 "global_i64",
-                                NativeMachineFactory.createImportGlobal(
+                                JffiNativeMachineFactory.createImportGlobal(
                                         Value.i64(666).raw(), ValType.I64, MutabilityType.Const)))
                 .addGlobal(
                         new ImportGlobal(
                                 "spectest",
                                 "global_f32",
-                                NativeMachineFactory.createImportGlobal(
+                                JffiNativeMachineFactory.createImportGlobal(
                                         Value.fromFloat(666.6f).raw(),
                                         ValType.F32,
                                         MutabilityType.Const)))
@@ -111,7 +111,7 @@ public final class Spectest {
                         new ImportGlobal(
                                 "spectest",
                                 "global_f64",
-                                NativeMachineFactory.createImportGlobal(
+                                JffiNativeMachineFactory.createImportGlobal(
                                         Value.fromDouble(666.6).raw(),
                                         ValType.F64,
                                         MutabilityType.Const)))
@@ -119,17 +119,18 @@ public final class Spectest {
                         new ImportMemory(
                                 "spectest",
                                 "memory",
-                                NativeMachineFactory.createMemory(new MemoryLimits(1, 2))))
+                                JffiNativeMachineFactory.createMemory(new MemoryLimits(1, 2))))
                 .addMemory(
                         new ImportMemory(
                                 "spectest",
                                 "shared_memory",
-                                NativeMachineFactory.createMemory(new MemoryLimits(1, 2, true))))
+                                JffiNativeMachineFactory.createMemory(
+                                        new MemoryLimits(1, 2, true))))
                 .addTable(
                         new ImportTable(
                                 "spectest",
                                 "table",
-                                NativeMachineFactory.createImportTable(
+                                JffiNativeMachineFactory.createImportTable(
                                         new Table(ValType.FuncRef, new TableLimits(10, 20)),
                                         REF_NULL_VALUE)))
                 .build();

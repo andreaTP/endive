@@ -1,14 +1,13 @@
-package run.endive.redline.experimental.runner;
+package run.endive.redline.experimental.runner.jffi;
 
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
+import com.kenai.jffi.MemoryIO;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Function;
-import run.endive.redline.experimental.runner.internal.NativeGlobalInstance;
-import run.endive.redline.experimental.runner.internal.NativeMachine;
-import run.endive.redline.experimental.runner.internal.NativeMemory;
-import run.endive.redline.experimental.runner.internal.NativeTable;
+import run.endive.redline.experimental.runner.jffi.internal.JffiNativeGlobalInstance;
+import run.endive.redline.experimental.runner.jffi.internal.JffiNativeMachine;
+import run.endive.redline.experimental.runner.jffi.internal.JffiNativeMemory;
+import run.endive.redline.experimental.runner.jffi.internal.JffiNativeTable;
 import run.endive.runtime.GlobalInstance;
 import run.endive.runtime.ImportValues;
 import run.endive.runtime.Instance;
@@ -21,18 +20,19 @@ import run.endive.wasm.types.MutabilityType;
 import run.endive.wasm.types.Table;
 import run.endive.wasm.types.ValType;
 
-public final class NativeMachineFactory {
+public final class JffiNativeMachineFactory {
 
-    private final Arena arena = Arena.ofShared();
+    private static final MemoryIO MEM = MemoryIO.getInstance();
+
     private final WasmModule module;
     private final byte[][] precompiledCode;
     private final Function<WasmModule, byte[][]> compilerFunction;
-    private final List<NativeTable> nativeTables = new ArrayList<>();
-    private MemorySegment globalsBuffer;
+    private final List<JffiNativeTable> nativeTables = new ArrayList<>();
+    private long globalsBufferAddr;
     private int globalIndex;
-    private NativeMachine nativeMachine;
+    private JffiNativeMachine nativeMachine;
 
-    private NativeMachineFactory(
+    private JffiNativeMachineFactory(
             WasmModule module,
             byte[][] precompiledCode,
             Function<WasmModule, byte[][]> compilerFunction) {
@@ -52,8 +52,8 @@ public final class NativeMachineFactory {
         int definedGlobalCount =
                 module.globalSection() != null ? module.globalSection().globalCount() : 0;
         int totalGlobals = importGlobalCount + definedGlobalCount;
-        this.globalsBuffer =
-                totalGlobals > 0 ? arena.allocate((long) totalGlobals * 8, 8) : MemorySegment.NULL;
+        this.globalsBufferAddr =
+                totalGlobals > 0 ? MEM.allocateMemory((long) totalGlobals * 8, true) : 0L;
         this.globalIndex = importGlobalCount;
     }
 
@@ -62,28 +62,29 @@ public final class NativeMachineFactory {
     }
 
     public TableInstance createTable(Table table, int initValue) {
-        var nativeTable = new NativeTable(table, arena);
+        var nativeTable = new JffiNativeTable(table);
         nativeTables.add(nativeTable);
         return nativeTable;
     }
 
     public static TableInstance createImportTable(Table table, int initValue) {
-        return new NativeTable(table, Arena.ofAuto());
+        return new JffiNativeTable(table);
     }
 
     public GlobalInstance createGlobal(
             long value, long highValue, ValType type, MutabilityType mutability) {
-        return new NativeGlobalInstance(globalsBuffer, globalIndex++, value, type, mutability);
+        return new JffiNativeGlobalInstance(
+                globalsBufferAddr, globalIndex++, value, type, mutability);
     }
 
     public static GlobalInstance createImportGlobal(
             long value, ValType type, MutabilityType mutability) {
-        var buf = Arena.ofAuto().allocate(8, 8);
-        return new NativeGlobalInstance(buf, 0, value, type, mutability);
+        long addr = MEM.allocateMemory(8, true);
+        return new JffiNativeGlobalInstance(addr, 0, value, type, mutability);
     }
 
     public static Memory createMemory(MemoryLimits limits) {
-        return new NativeMemory(limits);
+        return new JffiNativeMemory(limits);
     }
 
     public Machine compile(Instance instance) {
@@ -99,11 +100,10 @@ public final class NativeMachineFactory {
         this.globalIndex = importGlobalCount;
         this.nativeTables.clear();
         this.nativeMachine =
-                new NativeMachine(
+                new JffiNativeMachine(
                         instance,
-                        arena,
                         nativeTables,
-                        globalsBuffer,
+                        globalsBufferAddr,
                         precompiledCode,
                         compilerFunction);
         return nativeMachine;
@@ -154,12 +154,12 @@ public final class NativeMachineFactory {
         }
 
         public Instance.Builder toInstanceBuilder() {
-            var factory = new NativeMachineFactory(module, precompiledCode, compilerFunction);
+            var factory = new JffiNativeMachineFactory(module, precompiledCode, compilerFunction);
             return Instance.builder(module)
                     .withMachineFactory(factory::compile)
                     .withTableFactory(factory::createTable)
                     .withGlobalFactory(factory::createGlobal)
-                    .withMemoryFactory(NativeMachineFactory::createMemory)
+                    .withMemoryFactory(JffiNativeMachineFactory::createMemory)
                     .withStart(start)
                     .withInitialize(initialize);
         }

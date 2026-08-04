@@ -13,18 +13,22 @@
   <name>Endive - Redline</name>
   <description>Redline native compiler for WebAssembly</description>
 
+  <!-- Java 11 modules — always build -->
+  <modules>
+    <module>api</module>
+    <module>bridge</module>
+    <module>compiler</module>
+    <module>runner-jffi</module>
+    <module>runner-jffi-tests</module>
+  </modules>
+
   <profiles>
     <profile>
-      <id>default-redline-modules</id>
+      <id>java25</id>
       <activation>
-        <property>
-          <name>!release</name>
-        </property>
+        <jdk>[25,)</jdk>
       </activation>
       <modules>
-        <module>api</module>
-        <module>bridge</module>
-        <module>compiler</module>
         <module>runner</module>
         <module>runner-tests</module>
       </modules>
@@ -37,9 +41,6 @@
         </property>
       </activation>
       <modules>
-        <module>api</module>
-        <module>bridge</module>
-        <module>compiler</module>
         <module>runner</module>
       </modules>
     </profile>
