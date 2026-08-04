@@ -808,7 +808,7 @@ final class WasmAnalyzer {
         for (var ins : instructions) {
             var calc = calculators.get(ins.opcode());
             if (calc != null) {
-                max = Math.max(max, calc.maxTempSlots(ins, module));
+                max = Math.max(max, calc.maxTempSlots(ins, module, functionTypes));
             }
         }
         return max;

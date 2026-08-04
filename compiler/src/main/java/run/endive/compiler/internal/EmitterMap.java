@@ -1,14 +1,7 @@
 package run.endive.compiler.internal;
 
-import static run.endive.compiler.internal.CompilerUtil.hasTooManyParameters;
-import static run.endive.compiler.internal.CompilerUtil.slotCount;
-
 import java.util.Map;
 import run.endive.runtime.OpcodeImpl;
-import run.endive.wasm.WasmModule;
-import run.endive.wasm.types.ExternalType;
-import run.endive.wasm.types.FunctionType;
-import run.endive.wasm.types.TagImport;
 
 final class EmitterMap {
 
@@ -26,14 +19,7 @@ final class EmitterMap {
                 .intrinsic(
                         CompilerOpCode.DROP_KEEP,
                         Emitters::DROP_KEEP,
-                        (ins, module) -> {
-                            int keepStart = (int) ins.operand(0) + 1;
-                            int slots = 0;
-                            for (int i = keepStart; i < ins.operandCount(); i++) {
-                                slots += slotCount(ins.operand(i));
-                            }
-                            return slots;
-                        })
+                        TempSlotCalculators::dropKeep)
                 .intrinsic(CompilerOpCode.TRAP, Emitters::TRAP)
                 .intrinsic(CompilerOpCode.RETURN, Emitters::RETURN)
                 .intrinsic(CompilerOpCode.DROP, Emitters::DROP)
@@ -41,66 +27,40 @@ final class EmitterMap {
                 .intrinsic(CompilerOpCode.SELECT, Emitters::SELECT)
 
                 // ====== Control Flow ======
-                .intrinsic(
-                        CompilerOpCode.CALL,
-                        Emitters::CALL,
-                        (ins, module) -> callTempSlots(ins, module))
+                .intrinsic(CompilerOpCode.CALL, Emitters::CALL, TempSlotCalculators::call)
                 .intrinsic(
                         CompilerOpCode.CALL_INDIRECT,
                         Emitters::CALL_INDIRECT,
-                        (ins, module) -> {
-                            var type = module.typeSection().getType((int) ins.operand(0));
-                            if (hasTooManyParameters(type)) {
-                                return paramSlots(type);
-                            }
-                            return 0;
-                        })
+                        TempSlotCalculators::callIndirect)
                 .intrinsic(
                         CompilerOpCode.RETURN_CALL,
                         Emitters::RETURN_CALL,
-                        (ins, module) -> returnCallTempSlots(ins, module))
+                        TempSlotCalculators::returnCall)
                 .intrinsic(
                         CompilerOpCode.RETURN_CALL_INDIRECT,
                         Emitters::RETURN_CALL_INDIRECT,
-                        (ins, module) -> {
-                            var type = module.typeSection().getType((int) ins.operand(0));
-                            return paramSlots(type) + 1;
-                        })
+                        TempSlotCalculators::returnCallIndirect)
                 .intrinsic(
                         CompilerOpCode.RETURN_CALL_REF,
                         Emitters::RETURN_CALL_REF,
-                        (ins, module) -> {
-                            var type = module.typeSection().getType((int) ins.operand(0));
-                            return paramSlots(type) + 1;
-                        })
+                        TempSlotCalculators::returnCallRef)
 
                 // ====== Exception Handling ======
-                .intrinsic(
-                        CompilerOpCode.THROW,
-                        Emitters::THROW,
-                        (ins, module) -> {
-                            var tagType = resolveTagType((int) ins.operand(0), module);
-                            return tagType != null ? paramSlots(tagType) : 0;
-                        })
+                .intrinsic(CompilerOpCode.THROW, Emitters::THROW, TempSlotCalculators::throwOp)
                 .intrinsic(CompilerOpCode.THROW_REF, Emitters::THROW_REF)
                 .intrinsic(CompilerOpCode.CATCH_COMPARE_TAG, Emitters::CATCH_COMPARE_TAG)
                 .intrinsic(CompilerOpCode.CATCH_UNBOX_PARAMS, Emitters::CATCH_UNBOX_PARAMS)
                 .intrinsic(
                         CompilerOpCode.CATCH_REGISTER_EXCEPTION, Emitters::CATCH_REGISTER_EXCEPTION)
-                .intrinsic(CompilerOpCode.CATCH_START, Emitters::CATCH_START, (ins, module) -> 3)
+                .intrinsic(
+                        CompilerOpCode.CATCH_START,
+                        Emitters::CATCH_START,
+                        TempSlotCalculators::catchStart)
                 .intrinsic(CompilerOpCode.CATCH_END, Emitters::CATCH_END)
                 .intrinsic(
                         CompilerOpCode.TRY_SAVE_STACK,
                         Emitters::TRY_SAVE_STACK,
-                        (ins, module) -> {
-                            int belowCount = (int) ins.operand(1);
-                            int totalCount = ins.operandCount() - 2;
-                            int slots = 0;
-                            for (int i = belowCount; i < totalCount; i++) {
-                                slots += slotCount(ins.operand(i + 2));
-                            }
-                            return slots;
-                        })
+                        TempSlotCalculators::trySaveStack)
                 .intrinsic(CompilerOpCode.TRY_RESTORE_STACK, Emitters::TRY_RESTORE_STACK)
 
                 // ====== References ======
@@ -402,73 +362,37 @@ final class EmitterMap {
 
                 // ====== GC ======
                 .intrinsic(
-                        CompilerOpCode.CALL_REF,
-                        Emitters::CALL_REF,
-                        (ins, module) -> {
-                            var type = module.typeSection().getType((int) ins.operand(0));
-                            int slots = 1;
-                            if (hasTooManyParameters(type)) {
-                                slots = Math.max(slots, paramSlots(type));
-                            }
-                            return slots;
-                        })
+                        CompilerOpCode.CALL_REF, Emitters::CALL_REF, TempSlotCalculators::callRef)
                 .intrinsic(
                         CompilerOpCode.STRUCT_NEW,
                         Emitters::STRUCT_NEW,
-                        (ins, module) -> {
-                            var st =
-                                    module.typeSection()
-                                            .getSubType((int) ins.operand(0))
-                                            .compType()
-                                            .structType();
-                            int slots = 0;
-                            for (var ft : st.fieldTypes()) {
-                                if (ft.storageType().valType() != null) {
-                                    slots += slotCount(ft.storageType().valType().id());
-                                } else {
-                                    slots += 1;
-                                }
-                            }
-                            return slots;
-                        })
+                        TempSlotCalculators::structNew)
                 .intrinsic(CompilerOpCode.STRUCT_NEW_DEFAULT, Emitters::STRUCT_NEW_DEFAULT)
                 .intrinsic(CompilerOpCode.STRUCT_GET, Emitters::STRUCT_GET)
                 .intrinsic(CompilerOpCode.STRUCT_GET_S, Emitters::STRUCT_GET_S)
                 .intrinsic(CompilerOpCode.STRUCT_GET_U, Emitters::STRUCT_GET_U)
                 .intrinsic(CompilerOpCode.STRUCT_SET, Emitters::STRUCT_SET)
-                .intrinsic(CompilerOpCode.ARRAY_NEW, Emitters::ARRAY_NEW, (ins, module) -> 1)
+                .intrinsic(CompilerOpCode.ARRAY_NEW, Emitters::ARRAY_NEW, TempSlotCalculators::one)
                 .intrinsic(CompilerOpCode.ARRAY_NEW_DEFAULT, Emitters::ARRAY_NEW_DEFAULT)
                 .intrinsic(
                         CompilerOpCode.ARRAY_NEW_FIXED,
                         Emitters::ARRAY_NEW_FIXED,
-                        (ins, module) -> {
-                            int len = (int) ins.operand(1);
-                            var at =
-                                    module.typeSection()
-                                            .getSubType((int) ins.operand(0))
-                                            .compType()
-                                            .arrayType();
-                            if (at.fieldType().storageType().isObjectRef()) {
-                                return len;
-                            }
-                            int elemSlots;
-                            if (at.fieldType().storageType().valType() != null) {
-                                elemSlots = slotCount(at.fieldType().storageType().valType().id());
-                            } else {
-                                elemSlots = 1;
-                            }
-                            return len * elemSlots;
-                        })
+                        TempSlotCalculators::arrayNewFixed)
                 .intrinsic(
-                        CompilerOpCode.ARRAY_NEW_DATA, Emitters::ARRAY_NEW_DATA, (ins, module) -> 1)
+                        CompilerOpCode.ARRAY_NEW_DATA,
+                        Emitters::ARRAY_NEW_DATA,
+                        TempSlotCalculators::one)
                 .intrinsic(
-                        CompilerOpCode.ARRAY_NEW_ELEM, Emitters::ARRAY_NEW_ELEM, (ins, module) -> 1)
+                        CompilerOpCode.ARRAY_NEW_ELEM,
+                        Emitters::ARRAY_NEW_ELEM,
+                        TempSlotCalculators::one)
                 .intrinsic(CompilerOpCode.ARRAY_GET, Emitters::ARRAY_GET)
                 .intrinsic(CompilerOpCode.ARRAY_GET_S, Emitters::ARRAY_GET_S)
                 .intrinsic(CompilerOpCode.ARRAY_GET_U, Emitters::ARRAY_GET_U)
                 .intrinsic(CompilerOpCode.ARRAY_SET, Emitters::ARRAY_SET)
                 .intrinsic(CompilerOpCode.ARRAY_LEN, Emitters::ARRAY_LEN)
-                .intrinsic(CompilerOpCode.ARRAY_FILL, Emitters::ARRAY_FILL, (ins, module) -> 1)
+                .intrinsic(
+                        CompilerOpCode.ARRAY_FILL, Emitters::ARRAY_FILL, TempSlotCalculators::one)
                 .intrinsic(CompilerOpCode.ARRAY_COPY, Emitters::ARRAY_COPY)
                 .intrinsic(CompilerOpCode.ARRAY_INIT_DATA, Emitters::ARRAY_INIT_DATA)
                 .intrinsic(CompilerOpCode.ARRAY_INIT_ELEM, Emitters::ARRAY_INIT_ELEM)
@@ -485,75 +409,6 @@ final class EmitterMap {
                 .intrinsic(CompilerOpCode.BR_ON_NON_NULL_CHECK, Emitters::BR_ON_NON_NULL_CHECK)
                 .intrinsic(CompilerOpCode.BR_ON_CAST_CHECK, Emitters::BR_ON_CAST_CHECK)
                 .intrinsic(CompilerOpCode.BR_ON_CAST_FAIL_CHECK, Emitters::BR_ON_CAST_FAIL_CHECK);
-    }
-
-    private static int paramSlots(FunctionType type) {
-        return type.params().stream().mapToInt(CompilerUtil::slotCount).sum();
-    }
-
-    private static int callTempSlots(CompilerInstruction ins, WasmModule module) {
-        int funcIdx = (int) ins.operand(0);
-        int funcImports = module.importSection().count(ExternalType.FUNCTION);
-        FunctionType type;
-        if (funcIdx < funcImports) {
-            var imp = module.importSection().getImport(funcIdx);
-            type =
-                    module.typeSection()
-                            .getType(((run.endive.wasm.types.FunctionImport) imp).typeIndex());
-        } else {
-            type =
-                    module.typeSection()
-                            .getType(
-                                    module.functionSection()
-                                            .getFunctionType(funcIdx - funcImports));
-        }
-        if (hasTooManyParameters(type)) {
-            return paramSlots(type);
-        }
-        return 0;
-    }
-
-    private static int returnCallTempSlots(CompilerInstruction ins, WasmModule module) {
-        int funcIdx = (int) ins.operand(0);
-        int funcImports = module.importSection().count(ExternalType.FUNCTION);
-        FunctionType type;
-        if (funcIdx < funcImports) {
-            var imp = module.importSection().getImport(funcIdx);
-            type =
-                    module.typeSection()
-                            .getType(((run.endive.wasm.types.FunctionImport) imp).typeIndex());
-        } else {
-            type =
-                    module.typeSection()
-                            .getType(
-                                    module.functionSection()
-                                            .getFunctionType(funcIdx - funcImports));
-        }
-        return paramSlots(type);
-    }
-
-    private static FunctionType resolveTagType(int tagIdx, WasmModule module) {
-        int tagImportCount = module.importSection().count(ExternalType.TAG);
-        int typeIndex;
-        if (tagIdx < tagImportCount) {
-            int seen = 0;
-            for (int i = 0; i < module.importSection().importCount(); i++) {
-                var imp = module.importSection().getImport(i);
-                if (imp.importType() == ExternalType.TAG) {
-                    if (seen == tagIdx) {
-                        typeIndex = ((TagImport) imp).tagType().typeIdx();
-                        return module.typeSection().getType(typeIndex);
-                    }
-                    seen++;
-                }
-            }
-            return null;
-        } else if (module.tagSection().isPresent()) {
-            typeIndex = module.tagSection().get().getTag(tagIdx - tagImportCount).typeIdx();
-        } else {
-            return null;
-        }
-        return module.typeSection().getType(typeIndex);
     }
 
     private EmitterMap() {}

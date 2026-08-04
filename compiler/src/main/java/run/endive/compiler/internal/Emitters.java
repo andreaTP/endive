@@ -38,7 +38,6 @@ import org.objectweb.asm.commons.InstructionAdapter;
 import run.endive.runtime.Instance;
 import run.endive.runtime.OpCodeIdentifier;
 import run.endive.runtime.WasmException;
-import run.endive.wasm.WasmEngineException;
 import run.endive.wasm.WasmModule;
 import run.endive.wasm.types.FunctionType;
 import run.endive.wasm.types.ValType;
@@ -54,7 +53,8 @@ final class Emitters {
 
     @FunctionalInterface
     interface TempSlotCalculator {
-        int maxTempSlots(CompilerInstruction ins, WasmModule module);
+        int maxTempSlots(
+                CompilerInstruction ins, WasmModule module, List<FunctionType> functionTypes);
     }
 
     static class Builder {
@@ -104,16 +104,13 @@ final class Emitters {
     }
 
     private static void assertTempSlotInRange(Context ctx, int slotsNeeded) {
-        if (ctx.tempSlot() + slotsNeeded > ctx.trySaveBaseSlot()) {
-            throw new WasmEngineException(
-                    "temp slot overflow: need "
-                            + slotsNeeded
-                            + " slots at "
-                            + ctx.tempSlot()
-                            + " but try-save starts at "
-                            + ctx.trySaveBaseSlot()
-                            + " — computeMaxTempSlots is missing a case");
-        }
+        assert ctx.tempSlot() + slotsNeeded <= ctx.trySaveBaseSlot()
+                : "temp slot overflow: need "
+                        + slotsNeeded
+                        + " slots at "
+                        + ctx.tempSlot()
+                        + " but try-save starts at "
+                        + ctx.trySaveBaseSlot();
     }
 
     /**
