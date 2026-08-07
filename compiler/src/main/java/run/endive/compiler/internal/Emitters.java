@@ -38,6 +38,7 @@ import org.objectweb.asm.commons.InstructionAdapter;
 import run.endive.runtime.Instance;
 import run.endive.runtime.OpCodeIdentifier;
 import run.endive.runtime.WasmException;
+import run.endive.wasm.WasmModule;
 import run.endive.wasm.types.FunctionType;
 import run.endive.wasm.types.ValType;
 
@@ -50,13 +51,28 @@ final class Emitters {
         void emit(Context context, CompilerInstruction ins, InstructionAdapter asm);
     }
 
+    @FunctionalInterface
+    interface TempSlotCalculator {
+        int maxTempSlots(
+                CompilerInstruction ins, WasmModule module, List<FunctionType> functionTypes);
+    }
+
     static class Builder {
 
         private final Map<CompilerOpCode, BytecodeEmitter> emitters =
                 new EnumMap<>(CompilerOpCode.class);
+        private final Map<CompilerOpCode, TempSlotCalculator> calculators =
+                new EnumMap<>(CompilerOpCode.class);
 
         public Builder intrinsic(CompilerOpCode opCode, BytecodeEmitter emitter) {
             emitters.put(opCode, emitter);
+            return this;
+        }
+
+        public Builder intrinsic(
+                CompilerOpCode opCode, BytecodeEmitter emitter, TempSlotCalculator calc) {
+            emitters.put(opCode, emitter);
+            calculators.put(opCode, calc);
             return this;
         }
 
@@ -67,6 +83,10 @@ final class Emitters {
 
         public Map<CompilerOpCode, BytecodeEmitter> build() {
             return Map.copyOf(emitters);
+        }
+
+        public Map<CompilerOpCode, TempSlotCalculator> buildCalculators() {
+            return Map.copyOf(calculators);
         }
     }
 
@@ -81,6 +101,16 @@ final class Emitters {
 
     public static ValType valType(long id, Context ctx) {
         return ValType.builder().fromId(id).build().resolve(ctx.typeSection());
+    }
+
+    private static void assertTempSlotInRange(Context ctx, int slotsNeeded) {
+        assert ctx.tempSlot() + slotsNeeded <= ctx.trySaveBaseSlot()
+                : "temp slot overflow: need "
+                        + slotsNeeded
+                        + " slots at "
+                        + ctx.tempSlot()
+                        + " but try-save starts at "
+                        + ctx.trySaveBaseSlot();
     }
 
     /**
@@ -162,7 +192,9 @@ final class Emitters {
             Context ctx, InstructionAdapter asm, List<ValType> types) {
 
         // Store values from stack to locals in reverse order
-        int slot = ctx.tempSlot() + types.stream().mapToInt(CompilerUtil::slotCount).sum();
+        int slotsNeeded = types.stream().mapToInt(CompilerUtil::slotCount).sum();
+        assertTempSlotInRange(ctx, slotsNeeded);
+        int slot = ctx.tempSlot() + slotsNeeded;
         for (int i = types.size() - 1; i >= 0; i--) {
             ValType valType = types.get(i);
             slot -= slotCount(valType);
@@ -208,7 +240,9 @@ final class Emitters {
         boolean hasObjectRefs = types.stream().anyMatch(ValType::isObjectRef);
 
         // Store values from stack to locals in reverse order
-        int slot = ctx.tempSlot() + types.stream().mapToInt(CompilerUtil::slotCount).sum();
+        int slotsNeeded = types.stream().mapToInt(CompilerUtil::slotCount).sum();
+        assertTempSlotInRange(ctx, slotsNeeded);
+        int slot = ctx.tempSlot() + slotsNeeded;
         for (int i = types.size() - 1; i >= 0; i--) {
             ValType valType = types.get(i);
             slot -= slotCount(valType);
@@ -271,7 +305,9 @@ final class Emitters {
             Context ctx, InstructionAdapter asm, List<ValType> types) {
 
         // Store values from stack to locals in reverse order
-        int slot = ctx.tempSlot() + types.stream().mapToInt(CompilerUtil::slotCount).sum();
+        int slotsNeeded = types.stream().mapToInt(CompilerUtil::slotCount).sum();
+        assertTempSlotInRange(ctx, slotsNeeded);
+        int slot = ctx.tempSlot() + slotsNeeded;
         for (int i = types.size() - 1; i >= 0; i--) {
             ValType valType = types.get(i);
             slot -= slotCount(valType);
@@ -323,6 +359,7 @@ final class Emitters {
      */
     private static void emitBoxRefsOnStack(Context ctx, InstructionAdapter asm, int count) {
 
+        assertTempSlotInRange(ctx, count);
         // Store values from stack to locals in reverse order
         int slot = ctx.tempSlot() + count; // Object refs are 1 slot each
         for (int i = count - 1; i >= 0; i--) {

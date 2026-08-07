@@ -20,8 +20,11 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Memory;
+import run.endive.wasm.WasmModule;
+import run.endive.wasm.types.ExternalType;
 import run.endive.wasm.types.FunctionBody;
 import run.endive.wasm.types.FunctionType;
+import run.endive.wasm.types.TagImport;
 import run.endive.wasm.types.ValType;
 import run.endive.wasm.types.Value;
 
@@ -333,5 +336,27 @@ final class CompilerUtil {
 
     static String classNameForCallIndirect(String prefix, int typeId, int start) {
         return prefix + "Indirect_" + typeId + "_" + start;
+    }
+
+    static FunctionType resolveTagType(int tagIdx, WasmModule module) {
+        int tagImportCount = module.importSection().count(ExternalType.TAG);
+        if (tagIdx < tagImportCount) {
+            int seen = 0;
+            for (int i = 0; i < module.importSection().importCount(); i++) {
+                var imp = module.importSection().getImport(i);
+                if (imp.importType() == ExternalType.TAG) {
+                    if (seen == tagIdx) {
+                        int typeIndex = ((TagImport) imp).tagType().typeIdx();
+                        return module.typeSection().getType(typeIndex);
+                    }
+                    seen++;
+                }
+            }
+            return null;
+        } else if (module.tagSection().isPresent()) {
+            int typeIndex = module.tagSection().get().getTag(tagIdx - tagImportCount).typeIdx();
+            return module.typeSection().getType(typeIndex);
+        }
+        return null;
     }
 }

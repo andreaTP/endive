@@ -6,12 +6,9 @@ import static run.endive.compiler.internal.CompilerUtil.slotCount;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.IntFunction;
-import java.util.stream.Collectors;
 import run.endive.wasm.WasmModule;
-import run.endive.wasm.types.ExternalType;
 import run.endive.wasm.types.FunctionBody;
 import run.endive.wasm.types.FunctionType;
-import run.endive.wasm.types.TagImport;
 import run.endive.wasm.types.TypeSection;
 import run.endive.wasm.types.ValType;
 
@@ -35,7 +32,6 @@ final class Context {
     private final int instanceSlot;
     private final int tempSlot;
     private final int trySaveBaseSlot;
-    private final List<TagImport> tagImports;
     private final IntFunction<String> callIndirectClassResolver;
 
     public Context(
@@ -100,12 +96,6 @@ final class Context {
         this.slots = List.copyOf(slots);
         this.tempSlot = slot;
         this.trySaveBaseSlot = slot + maxTempSlots;
-
-        this.tagImports =
-                module.importSection().stream()
-                        .filter((x) -> x.importType() == ExternalType.TAG)
-                        .map((x) -> (TagImport) x)
-                        .collect(Collectors.toList());
     }
 
     public String internalClassName() {
@@ -181,19 +171,10 @@ final class Context {
     }
 
     public FunctionType tagFunctionType(int tagId) {
-        if (tagId < 0) {
-            throw new IllegalArgumentException("Tag ID must be non-negative");
+        var type = CompilerUtil.resolveTagType(tagId, module);
+        if (type == null) {
+            throw new IllegalStateException("Tag not found: " + tagId);
         }
-        int idx;
-        if (tagId < tagImports.size()) {
-            var tag = tagImports.get(tagId);
-            idx = tag.tagType().typeIdx();
-        } else {
-            if (module.tagSection().isEmpty()) {
-                throw new IllegalStateException("No tag section available");
-            }
-            idx = module.tagSection().get().getTag(tagId - tagImports.size()).typeIdx();
-        }
-        return type(idx);
+        return type;
     }
 }
