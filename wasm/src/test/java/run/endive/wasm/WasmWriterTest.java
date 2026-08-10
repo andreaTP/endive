@@ -15,7 +15,8 @@ public class WasmWriterTest {
     public void shouldRoundTrip() throws IOException {
         for (var file : wasmCorpusFiles()) {
             // uses non-canonical size encodings
-            if (file.getName().endsWith("main.go.wasm")) {
+            if (file.getName().endsWith("main.go.wasm")
+                    || file.getName().endsWith("trap.kt.wasm")) {
                 continue;
             }
 
