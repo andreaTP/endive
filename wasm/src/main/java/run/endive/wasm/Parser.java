@@ -785,7 +785,9 @@ public final class Parser {
             var firstByte = (int) readVarUInt32(buffer);
             if (firstByte == 0x40) {
                 var secondByte = readVarUInt32(buffer);
-                assert secondByte == 0x00;
+                if (secondByte != 0x00) {
+                    throw new MalformedException("incorrect second byte");
+                }
                 var tableType = readValueType(buffer, typeSection);
                 var limits = readTableLimits(buffer);
                 var init = parseExpression(buffer);
