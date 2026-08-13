@@ -5,7 +5,11 @@ title: Installation
 ---
 # Installation
 
+Endive requires **Java 11** or later.
+
 Add Endive to your project using Maven or Gradle.
+
+[![Maven Central](https://img.shields.io/maven-central/v/run.endive/runtime)](https://central.sonatype.com/artifact/run.endive/runtime)
 
 ## Maven
 

@@ -4,7 +4,13 @@ sidebar_label: Quick Start
 title: Quick start
 ---
 
+:::info[Requirements]
+Endive requires **Java 11** or later. SIMD support requires Java 21+.
+:::
+
 ### Install the dependency
+
+[![Maven Central](https://img.shields.io/maven-central/v/run.endive/runtime)](https://central.sonatype.com/artifact/run.endive/runtime)
 
 To use the runtime, you need to add the `run.endive:runtime` dependency
 to your dependency management system.
@@ -63,6 +69,10 @@ import java.io.File;
 var module = Parser.parse(new File("./factorial.wasm"));
 Instance instance = Instance.builder(module).build();
 ```
+
+:::note[Threading]
+`Instance` and `Store` are not thread-safe. Create separate instances per thread, or synchronize access externally. Memory operations (used by the Wasm threads proposal) are thread-safe.
+:::
 
 You can think of the `module` as of inert code, and the `instance` 
 is the run-time representation of that code: a virtual machine ready to execute.
