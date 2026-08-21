@@ -182,9 +182,14 @@ function generateLlmsFullTxt(docEntries, blogEntries) {
     sections.push(cleanContent(entry.content));
   }
 
+  if (blogEntries.length > 0) {
+    sections.push('---', '', '# Blog Posts', '',
+      '> The following are blog posts, not reference documentation.', '');
+  }
+
   for (const entry of blogEntries) {
     sections.push('---', '');
-    sections.push(`## Blog: ${entry.title}`);
+    sections.push(`## ${entry.title}`);
     sections.push('');
     sections.push(cleanContent(entry.content));
   }
