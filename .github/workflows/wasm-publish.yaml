@@ -6,6 +6,10 @@ on:
     paths: ['redline/wasm-build/**']
   workflow_dispatch:
 
+# Must stay in sync with the imageRef tag in redline/bridge/pom.xml.
+env:
+  WASM_VERSION: 999.0.0-SNAPSHOT
+
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
@@ -32,7 +36,23 @@ jobs:
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u ${{ github.actor }} --password-stdin
 
+      # Pushed from inside redline/ so the org.opencontainers.image.title
+      # annotation is a bare filename. A path like "redline/cranelift_bridge.wasm"
+      # makes the OCI client try to write into a directory that does not exist
+      # on pull.
+      #
+      # The tag must be valid semver: the wkg lock file rejects "latest".
       - name: Push to GHCR
+        working-directory: redline
         run: |
-          oras push ghcr.io/bytecodealliance/endive-cranelift-bridge:latest \
-            redline/cranelift_bridge.wasm:application/wasm
+          oras push \
+            ghcr.io/bytecodealliance/endive-cranelift-bridge:${{ env.WASM_VERSION }} \
+            cranelift_bridge.wasm:application/wasm
+
+      - name: Report new digest
+        run: |
+          echo "Published ${{ env.WASM_VERSION }}. Refresh the pinned digest with:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo './mvnw generate-sources -pl :redline-bridge-experimental -Dinlay.update' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo 'then commit redline/wkg.lock.' >> $GITHUB_STEP_SUMMARY
