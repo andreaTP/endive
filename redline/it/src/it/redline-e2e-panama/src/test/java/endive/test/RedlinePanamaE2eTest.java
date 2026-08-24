@@ -4,9 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import org.junit.jupiter.api.Test;
 import run.endive.redline.experimental.api.NativeMachineFactoryProvider;
+import run.endive.redline.experimental.api.internal.RedlineTarget;
 
 class RedlinePanamaE2eTest {
 
@@ -32,6 +34,10 @@ class RedlinePanamaE2eTest {
 
     @Test
     public void nativeCodeIsAvailable() {
+        assumeTrue(
+                RedlineTarget.detectHost().isPresent(),
+                "Host is not one of the Redline target platforms, so no native code was"
+                        + " cross-compiled for it");
         assertNotNull(
                 AddModule.loadNativeCode(), "Native code should be available on this platform");
     }

@@ -8,19 +8,11 @@
   <packaging>jar</packaging>
 
   <dependencies>
-    <dependency>
-      <groupId>run.endive</groupId>
-      <artifactId>redline-api-experimental</artifactId>
-      <version>@project.version@</version>
-    </dependency>
+    <!-- The only dependency a consumer needs. It brings in redline-api (used by
+         the generated builder), runtime and wasm transitively. -->
     <dependency>
       <groupId>run.endive</groupId>
       <artifactId>redline-runner-jffi-experimental</artifactId>
-      <version>@project.version@</version>
-    </dependency>
-    <dependency>
-      <groupId>run.endive</groupId>
-      <artifactId>runtime</artifactId>
       <version>@project.version@</version>
     </dependency>
 
@@ -36,6 +28,7 @@
       <version>@junit.version@</version>
       <scope>test</scope>
     </dependency>
+
   </dependencies>
 
   <build>
@@ -61,7 +54,6 @@
             <configuration>
               <name>endive.test.AddModule</name>
               <wasmFile>src/test/resources/add.wat.wasm</wasmFile>
-              <interpreterFallback>WARN</interpreterFallback>
               <redlineExperimental>true</redlineExperimental>
             </configuration>
           </execution>
