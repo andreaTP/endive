@@ -7,9 +7,28 @@ import com.github.javaparser.StaticJavaParser;
 import com.github.javaparser.ast.Modifier;
 import com.github.javaparser.ast.NodeList;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
+import com.github.javaparser.ast.body.Parameter;
+import com.github.javaparser.ast.body.VariableDeclarator;
+import com.github.javaparser.ast.expr.AssignExpr;
+import com.github.javaparser.ast.expr.BinaryExpr;
+import com.github.javaparser.ast.expr.ClassExpr;
+import com.github.javaparser.ast.expr.ConditionalExpr;
 import com.github.javaparser.ast.expr.FieldAccessExpr;
+import com.github.javaparser.ast.expr.MethodCallExpr;
+import com.github.javaparser.ast.expr.MethodReferenceExpr;
 import com.github.javaparser.ast.expr.NameExpr;
+import com.github.javaparser.ast.expr.NullLiteralExpr;
+import com.github.javaparser.ast.expr.ObjectCreationExpr;
+import com.github.javaparser.ast.expr.StringLiteralExpr;
+import com.github.javaparser.ast.expr.VariableDeclarationExpr;
+import com.github.javaparser.ast.stmt.BlockStmt;
+import com.github.javaparser.ast.stmt.CatchClause;
+import com.github.javaparser.ast.stmt.ExpressionStmt;
+import com.github.javaparser.ast.stmt.IfStmt;
 import com.github.javaparser.ast.stmt.ReturnStmt;
+import com.github.javaparser.ast.stmt.ThrowStmt;
+import com.github.javaparser.ast.stmt.TryStmt;
+import com.github.javaparser.ast.type.VarType;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -93,6 +112,26 @@ public final class RedlineGenerator {
 
     private static void generateNativeCodeHolderInnerClass(
             ClassOrInterfaceDeclaration type, String moduleName) {
+        // Generates:
+        // <code>
+        //     private static class NativeCodeHolder {
+        //         static final byte[][] CODE;
+        //         static {
+        //             var host = RedlineTarget.detectHost().orElse(null);
+        //             if (host == null) {
+        //                 CODE = null;
+        //             } else {
+        //                 String resource = "<moduleName>." + host.resourceSuffix() + ".native";
+        //                 try (InputStream in =
+        //                         <moduleName>.class.getResourceAsStream(resource)) {
+        //                     CODE = (in == null) ? null : NativeCodeSerializer.deserialize(in);
+        //                 } catch (IOException e) {
+        //                     throw new UncheckedIOException("Failed to load native code", e);
+        //                 }
+        //             }
+        //         }
+        //     }
+        // </code>
         var holderClass =
                 new ClassOrInterfaceDeclaration(
                         NodeList.nodeList(
@@ -105,33 +144,108 @@ public final class RedlineGenerator {
         holderClass.addField(
                 parseType("byte[][]"), "CODE", Modifier.Keyword.STATIC, Modifier.Keyword.FINAL);
 
+        // var host = RedlineTarget.detectHost().orElse(null);
+        var detectHost =
+                new MethodCallExpr(
+                        new MethodCallExpr(new NameExpr("RedlineTarget"), "detectHost"),
+                        "orElse",
+                        new NodeList<>(new NullLiteralExpr()));
+        var hostVar =
+                new ExpressionStmt(
+                        new VariableDeclarationExpr(
+                                new VariableDeclarator(new VarType(), "host", detectHost)));
+
+        // CODE = null;
+        var assignNull =
+                new ExpressionStmt(
+                        new AssignExpr(
+                                new NameExpr("CODE"),
+                                new NullLiteralExpr(),
+                                AssignExpr.Operator.ASSIGN));
+
+        // String resource = "<moduleName>." + host.resourceSuffix() + ".native";
+        var resourceName =
+                new BinaryExpr(
+                        new BinaryExpr(
+                                new StringLiteralExpr(moduleName + "."),
+                                new MethodCallExpr(new NameExpr("host"), "resourceSuffix"),
+                                BinaryExpr.Operator.PLUS),
+                        new StringLiteralExpr(".native"),
+                        BinaryExpr.Operator.PLUS);
+        var resourceVar =
+                new ExpressionStmt(
+                        new VariableDeclarationExpr(
+                                new VariableDeclarator(
+                                        parseClassOrInterfaceType("String"),
+                                        "resource",
+                                        resourceName)));
+
+        // try (InputStream in = <moduleName>.class.getResourceAsStream(resource))
+        var getResource =
+                new MethodCallExpr(
+                        new ClassExpr(parseType(moduleName)),
+                        "getResourceAsStream",
+                        new NodeList<>(new NameExpr("resource")));
+        var streamResource =
+                new VariableDeclarationExpr(
+                        new VariableDeclarator(parseType("InputStream"), "in", getResource));
+
+        // CODE = (in == null) ? null : NativeCodeSerializer.deserialize(in);
+        var deserialize =
+                new ConditionalExpr(
+                        new BinaryExpr(
+                                new NameExpr("in"),
+                                new NullLiteralExpr(),
+                                BinaryExpr.Operator.EQUALS),
+                        new NullLiteralExpr(),
+                        new MethodCallExpr(
+                                new NameExpr("NativeCodeSerializer"),
+                                "deserialize",
+                                new NodeList<>(new NameExpr("in"))));
+        var assignCode =
+                new ExpressionStmt(
+                        new AssignExpr(
+                                new NameExpr("CODE"), deserialize, AssignExpr.Operator.ASSIGN));
+
+        // catch (IOException e) { throw new UncheckedIOException("...", e); }
+        var newException =
+                new ObjectCreationExpr()
+                        .setType(parseClassOrInterfaceType("UncheckedIOException"))
+                        .addArgument(new StringLiteralExpr("Failed to load native code"))
+                        .addArgument(new NameExpr("e"));
+        var catchIoException =
+                new CatchClause()
+                        .setParameter(new Parameter(parseClassOrInterfaceType("IOException"), "e"))
+                        .setBody(new BlockStmt(new NodeList<>(new ThrowStmt(newException))));
+
+        var tryLoad =
+                new TryStmt()
+                        .setResources(new NodeList<>(streamResource))
+                        .setTryBlock(new BlockStmt(new NodeList<>(assignCode)))
+                        .setCatchClauses(new NodeList<>(catchIoException));
+
+        var loadFromResource =
+                new IfStmt()
+                        .setCondition(
+                                new BinaryExpr(
+                                        new NameExpr("host"),
+                                        new NullLiteralExpr(),
+                                        BinaryExpr.Operator.EQUALS))
+                        .setThenStmt(new BlockStmt(new NodeList<>(assignNull)))
+                        .setElseStmt(new BlockStmt(new NodeList<>(resourceVar, tryLoad)));
+
         var initBody = holderClass.addStaticInitializer();
-
-        initBody.addStatement(
-                StaticJavaParser.parseStatement(
-                        "var host = RedlineTarget.detectHost().orElse(null);"));
-
-        initBody.addStatement(
-                StaticJavaParser.parseStatement(
-                        "if (host == null) {\n"
-                                + "    CODE = null;\n"
-                                + "} else {\n"
-                                + "    String resource = \""
-                                + moduleName
-                                + ".\" + host.resourceSuffix() + \".native\";\n"
-                                + "    try (InputStream in = "
-                                + moduleName
-                                + ".class.getResourceAsStream(resource)) {\n"
-                                + "        CODE = (in == null) ? null"
-                                + " : NativeCodeSerializer.deserialize(in);\n"
-                                + "    } catch (IOException e) {\n"
-                                + "        throw new UncheckedIOException("
-                                + "\"Failed to load native code\", e);\n"
-                                + "    }\n"
-                                + "}"));
+        initBody.addStatement(hostVar);
+        initBody.addStatement(loadFromResource);
     }
 
     private static void generateLoadNativeCodeMethod(ClassOrInterfaceDeclaration type) {
+        // Generates:
+        // <code>
+        //     public static byte[][] loadNativeCode() {
+        //         return NativeCodeHolder.CODE;
+        //     }
+        // </code>
         var method =
                 type.addMethod("loadNativeCode", Modifier.Keyword.PUBLIC, Modifier.Keyword.STATIC)
                         .setType(parseType("byte[][]"));
@@ -142,40 +256,107 @@ public final class RedlineGenerator {
     }
 
     private static void generateBuilderMethod(ClassOrInterfaceDeclaration type, String moduleName) {
+        // Generates:
+        // <code>
+        //     public static Instance.Builder builder() {
+        //         var module = load();
+        //         byte[][] nativeCode = loadNativeCode();
+        //         if (nativeCode != null) {
+        //             var provider = NativeMachineFactoryProvider.discover();
+        //             if (provider.isPresent()) {
+        //                 return provider.get().builder(module, nativeCode);
+        //             }
+        //         }
+        //         return Instance.builder(module).withMachineFactory(<moduleName>::create);
+        //     }
+        // </code>
         var method =
                 type.addMethod("builder", Modifier.Keyword.PUBLIC, Modifier.Keyword.STATIC)
                         .setType(parseClassOrInterfaceType("Instance.Builder"));
 
+        // var module = load();
+        var moduleVar =
+                new ExpressionStmt(
+                        new VariableDeclarationExpr(
+                                new VariableDeclarator(
+                                        new VarType(), "module", new MethodCallExpr("load"))));
+
+        // byte[][] nativeCode = loadNativeCode();
+        var nativeCodeVar =
+                new ExpressionStmt(
+                        new VariableDeclarationExpr(
+                                new VariableDeclarator(
+                                        parseType("byte[][]"),
+                                        "nativeCode",
+                                        new MethodCallExpr("loadNativeCode"))));
+
+        // var provider = NativeMachineFactoryProvider.discover();
+        var providerVar =
+                new ExpressionStmt(
+                        new VariableDeclarationExpr(
+                                new VariableDeclarator(
+                                        new VarType(),
+                                        "provider",
+                                        new MethodCallExpr(
+                                                new NameExpr("NativeMachineFactoryProvider"),
+                                                "discover"))));
+
+        // return provider.get().builder(module, nativeCode);
+        var returnNative =
+                new ReturnStmt(
+                        new MethodCallExpr(
+                                new MethodCallExpr(new NameExpr("provider"), "get"),
+                                "builder",
+                                new NodeList<>(
+                                        new NameExpr("module"), new NameExpr("nativeCode"))));
+
+        var ifProviderPresent =
+                new IfStmt()
+                        .setCondition(new MethodCallExpr(new NameExpr("provider"), "isPresent"))
+                        .setThenStmt(new BlockStmt(new NodeList<>(returnNative)));
+
+        var ifNativeCode =
+                new IfStmt()
+                        .setCondition(
+                                new BinaryExpr(
+                                        new NameExpr("nativeCode"),
+                                        new NullLiteralExpr(),
+                                        BinaryExpr.Operator.NOT_EQUALS))
+                        .setThenStmt(new BlockStmt(new NodeList<>(providerVar, ifProviderPresent)));
+
         var body = method.createBody();
-        body.addStatement(StaticJavaParser.parseStatement("var module = load();"));
-        body.addStatement(
-                StaticJavaParser.parseStatement("byte[][] nativeCode = loadNativeCode();"));
-        body.addStatement(
-                StaticJavaParser.parseStatement(
-                        "if (nativeCode != null) {\n"
-                                + "    var provider = NativeMachineFactoryProvider.discover();\n"
-                                + "    if (provider.isPresent()) {\n"
-                                + "        return provider.get().builder(module, nativeCode);\n"
-                                + "    }\n"
-                                + "}"));
-        body.addStatement(
-                StaticJavaParser.parseStatement(
-                        "return Instance.builder(module).withMachineFactory("
-                                + moduleName
-                                + "::create);"));
+        body.addStatement(moduleVar);
+        body.addStatement(nativeCodeVar);
+        body.addStatement(ifNativeCode);
+        body.addStatement(new ReturnStmt(interpreterBuilder(new NameExpr("module"), moduleName)));
     }
 
     private static void generateSafeBuilderMethod(
             ClassOrInterfaceDeclaration type, String moduleName) {
+        // Generates:
+        // <code>
+        //     public static Instance.Builder safeBuilder() {
+        //         return Instance.builder(load()).withMachineFactory(<moduleName>::create);
+        //     }
+        // </code>
         var method =
                 type.addMethod("safeBuilder", Modifier.Keyword.PUBLIC, Modifier.Keyword.STATIC)
                         .setType(parseClassOrInterfaceType("Instance.Builder"));
 
         method.createBody()
                 .addStatement(
-                        StaticJavaParser.parseStatement(
-                                "return Instance.builder(load()).withMachineFactory("
-                                        + moduleName
-                                        + "::create);"));
+                        new ReturnStmt(interpreterBuilder(new MethodCallExpr("load"), moduleName)));
+    }
+
+    /** {@code Instance.builder(<module>).withMachineFactory(<moduleName>::create)} */
+    private static MethodCallExpr interpreterBuilder(
+            com.github.javaparser.ast.expr.Expression module, String moduleName) {
+        return new MethodCallExpr(
+                new MethodCallExpr(new NameExpr("Instance"), "builder", new NodeList<>(module)),
+                "withMachineFactory",
+                new NodeList<>(
+                        new MethodReferenceExpr()
+                                .setScope(new NameExpr(moduleName))
+                                .setIdentifier("create")));
     }
 }
