@@ -45,6 +45,7 @@ jobs:
 
       - name: Compile
         run: ./mvnw --batch-mode -Dquickly
+
       - name: Setup Git
         run: |
           git config user.name "Endive BOT"
@@ -52,7 +53,8 @@ jobs:
 
       - name: Set the version
         run: |
-          ./mvnw versions:set -DgenerateBackupPoms=false -DnewVersion=${{ github.event.inputs.release-version }}          git add .
+          ./mvnw versions:set -DgenerateBackupPoms=false -DnewVersion=${{ github.event.inputs.release-version }}
+          git add .
           git commit -m "Release version update ${{ github.event.inputs.release-version }}"
           git push
           git tag ${{ github.event.inputs.release-version }}
@@ -63,7 +65,8 @@ jobs:
       - name: Release to Maven Central
         run: |
           # -Dquickly is needed to locally publish wasm-corpus
-          ./mvnw --batch-mode -Dquickly          ./mvnw --batch-mode clean deploy -Drelease -Predline -DskipTests=true -X
+          ./mvnw --batch-mode -Dquickly
+          ./mvnw --batch-mode clean deploy -Drelease -DskipTests=true -X
         env:
           MAVEN_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
           MAVEN_CENTRAL_TOKEN: ${{ secrets.SONATYPE_PASSWORD }}
@@ -71,7 +74,8 @@ jobs:
 
       - name: Back to Snapshot
         run: |
-          ./mvnw versions:set -DgenerateBackupPoms=false -DnewVersion=999-SNAPSHOT          git add .
+          ./mvnw versions:set -DgenerateBackupPoms=false -DnewVersion=999-SNAPSHOT
+          git add .
           git commit -m "Snapshot version update"
           git push
         env:
