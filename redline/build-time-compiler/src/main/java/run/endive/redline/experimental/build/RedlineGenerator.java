@@ -12,13 +12,11 @@ import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.AssignExpr;
 import com.github.javaparser.ast.expr.BinaryExpr;
 import com.github.javaparser.ast.expr.ClassExpr;
-import com.github.javaparser.ast.expr.ConditionalExpr;
 import com.github.javaparser.ast.expr.FieldAccessExpr;
 import com.github.javaparser.ast.expr.MethodCallExpr;
 import com.github.javaparser.ast.expr.MethodReferenceExpr;
 import com.github.javaparser.ast.expr.NameExpr;
 import com.github.javaparser.ast.expr.NullLiteralExpr;
-import com.github.javaparser.ast.expr.ObjectCreationExpr;
 import com.github.javaparser.ast.expr.StringLiteralExpr;
 import com.github.javaparser.ast.expr.VariableDeclarationExpr;
 import com.github.javaparser.ast.stmt.BlockStmt;
@@ -26,7 +24,6 @@ import com.github.javaparser.ast.stmt.CatchClause;
 import com.github.javaparser.ast.stmt.ExpressionStmt;
 import com.github.javaparser.ast.stmt.IfStmt;
 import com.github.javaparser.ast.stmt.ReturnStmt;
-import com.github.javaparser.ast.stmt.ThrowStmt;
 import com.github.javaparser.ast.stmt.TryStmt;
 import com.github.javaparser.ast.type.VarType;
 import java.io.FileOutputStream;
@@ -99,11 +96,12 @@ public final class RedlineGenerator {
         cu.addImport("run.endive.redline.experimental.api.internal.RedlineTarget");
         cu.addImport("java.io.InputStream");
         cu.addImport("java.io.IOException");
-        cu.addImport("java.io.UncheckedIOException");
+        cu.addImport("java.util.Optional");
         cu.addImport("run.endive.runtime.Instance");
 
         generateNativeCodeHolderInnerClass(type, baseName);
         generateLoadNativeCodeMethod(type);
+        generateNativeProviderMethod(type);
         generateBuilderMethod(type, baseName);
         generateSafeBuilderMethod(type, baseName);
 
@@ -117,21 +115,28 @@ public final class RedlineGenerator {
         //     private static class NativeCodeHolder {
         //         static final byte[][] CODE;
         //         static {
+        //             byte[][] loaded = null;
         //             var host = RedlineTarget.detectHost().orElse(null);
-        //             if (host == null) {
-        //                 CODE = null;
-        //             } else {
+        //             if (host != null) {
         //                 String resource = "<moduleName>." + host.resourceSuffix() + ".native";
         //                 try (InputStream in =
         //                         <moduleName>.class.getResourceAsStream(resource)) {
-        //                     CODE = (in == null) ? null : NativeCodeSerializer.deserialize(in);
+        //                     if (in != null) {
+        //                         loaded = NativeCodeSerializer.deserialize(in);
+        //                     }
         //                 } catch (IOException e) {
-        //                     throw new UncheckedIOException("Failed to load native code", e);
+        //                     loaded = null;
         //                 }
         //             }
+        //             CODE = loaded;
         //         }
         //     }
         // </code>
+        //
+        // Loading into a local keeps CODE definitely-assigned-once (a static final
+        // cannot be assigned in both the try and the catch), and lets a missing or
+        // unreadable blob leave CODE null so builder() falls back to the build-time
+        // compiled bytecode instead of the class being permanently unusable.
         var holderClass =
                 new ClassOrInterfaceDeclaration(
                         NodeList.nodeList(
@@ -144,6 +149,13 @@ public final class RedlineGenerator {
         holderClass.addField(
                 parseType("byte[][]"), "CODE", Modifier.Keyword.STATIC, Modifier.Keyword.FINAL);
 
+        // byte[][] loaded = null;
+        var loadedVar =
+                new ExpressionStmt(
+                        new VariableDeclarationExpr(
+                                new VariableDeclarator(
+                                        parseType("byte[][]"), "loaded", new NullLiteralExpr())));
+
         // var host = RedlineTarget.detectHost().orElse(null);
         var detectHost =
                 new MethodCallExpr(
@@ -154,14 +166,6 @@ public final class RedlineGenerator {
                 new ExpressionStmt(
                         new VariableDeclarationExpr(
                                 new VariableDeclarator(new VarType(), "host", detectHost)));
-
-        // CODE = null;
-        var assignNull =
-                new ExpressionStmt(
-                        new AssignExpr(
-                                new NameExpr("CODE"),
-                                new NullLiteralExpr(),
-                                AssignExpr.Operator.ASSIGN));
 
         // String resource = "<moduleName>." + host.resourceSuffix() + ".native";
         var resourceName =
@@ -190,38 +194,41 @@ public final class RedlineGenerator {
                 new VariableDeclarationExpr(
                         new VariableDeclarator(parseType("InputStream"), "in", getResource));
 
-        // CODE = (in == null) ? null : NativeCodeSerializer.deserialize(in);
-        var deserialize =
-                new ConditionalExpr(
-                        new BinaryExpr(
-                                new NameExpr("in"),
-                                new NullLiteralExpr(),
-                                BinaryExpr.Operator.EQUALS),
-                        new NullLiteralExpr(),
-                        new MethodCallExpr(
-                                new NameExpr("NativeCodeSerializer"),
-                                "deserialize",
-                                new NodeList<>(new NameExpr("in"))));
-        var assignCode =
+        // if (in != null) { loaded = NativeCodeSerializer.deserialize(in); }
+        var assignLoaded =
                 new ExpressionStmt(
                         new AssignExpr(
-                                new NameExpr("CODE"), deserialize, AssignExpr.Operator.ASSIGN));
+                                new NameExpr("loaded"),
+                                new MethodCallExpr(
+                                        new NameExpr("NativeCodeSerializer"),
+                                        "deserialize",
+                                        new NodeList<>(new NameExpr("in"))),
+                                AssignExpr.Operator.ASSIGN));
+        var ifStreamPresent =
+                new IfStmt()
+                        .setCondition(
+                                new BinaryExpr(
+                                        new NameExpr("in"),
+                                        new NullLiteralExpr(),
+                                        BinaryExpr.Operator.NOT_EQUALS))
+                        .setThenStmt(new BlockStmt(new NodeList<>(assignLoaded)));
 
-        // catch (IOException e) { throw new UncheckedIOException("...", e); }
-        var newException =
-                new ObjectCreationExpr()
-                        .setType(parseClassOrInterfaceType("UncheckedIOException"))
-                        .addArgument(new StringLiteralExpr("Failed to load native code"))
-                        .addArgument(new NameExpr("e"));
+        // catch (IOException e) { loaded = null; }
+        var resetLoaded =
+                new ExpressionStmt(
+                        new AssignExpr(
+                                new NameExpr("loaded"),
+                                new NullLiteralExpr(),
+                                AssignExpr.Operator.ASSIGN));
         var catchIoException =
                 new CatchClause()
                         .setParameter(new Parameter(parseClassOrInterfaceType("IOException"), "e"))
-                        .setBody(new BlockStmt(new NodeList<>(new ThrowStmt(newException))));
+                        .setBody(new BlockStmt(new NodeList<>(resetLoaded)));
 
         var tryLoad =
                 new TryStmt()
                         .setResources(new NodeList<>(streamResource))
-                        .setTryBlock(new BlockStmt(new NodeList<>(assignCode)))
+                        .setTryBlock(new BlockStmt(new NodeList<>(ifStreamPresent)))
                         .setCatchClauses(new NodeList<>(catchIoException));
 
         var loadFromResource =
@@ -230,13 +237,22 @@ public final class RedlineGenerator {
                                 new BinaryExpr(
                                         new NameExpr("host"),
                                         new NullLiteralExpr(),
-                                        BinaryExpr.Operator.EQUALS))
-                        .setThenStmt(new BlockStmt(new NodeList<>(assignNull)))
-                        .setElseStmt(new BlockStmt(new NodeList<>(resourceVar, tryLoad)));
+                                        BinaryExpr.Operator.NOT_EQUALS))
+                        .setThenStmt(new BlockStmt(new NodeList<>(resourceVar, tryLoad)));
+
+        // CODE = loaded;
+        var assignCode =
+                new ExpressionStmt(
+                        new AssignExpr(
+                                new NameExpr("CODE"),
+                                new NameExpr("loaded"),
+                                AssignExpr.Operator.ASSIGN));
 
         var initBody = holderClass.addStaticInitializer();
+        initBody.addStatement(loadedVar);
         initBody.addStatement(hostVar);
         initBody.addStatement(loadFromResource);
+        initBody.addStatement(assignCode);
     }
 
     private static void generateLoadNativeCodeMethod(ClassOrInterfaceDeclaration type) {
@@ -255,21 +271,61 @@ public final class RedlineGenerator {
                                 new FieldAccessExpr(new NameExpr("NativeCodeHolder"), "CODE")));
     }
 
+    private static void generateNativeProviderMethod(ClassOrInterfaceDeclaration type) {
+        // Generates:
+        // <code>
+        //     public static Optional&lt;NativeMachineFactoryProvider&gt; nativeProvider() {
+        //         if (loadNativeCode() == null) {
+        //             return Optional.empty();
+        //         }
+        //         return NativeMachineFactoryProvider.discover();
+        //     }
+        // </code>
+        //
+        // Non-empty exactly when builder() will take the native path, so callers can
+        // tell which backend they got. Modules with imported memories or tables need
+        // this: the native machines reject a memory that was not created by their own
+        // factory, so imports must be built with the returned provider.
+        var method =
+                type.addMethod("nativeProvider", Modifier.Keyword.PUBLIC, Modifier.Keyword.STATIC)
+                        .setType(
+                                parseClassOrInterfaceType(
+                                        "Optional<NativeMachineFactoryProvider>"));
+
+        var returnEmpty = new ReturnStmt(new MethodCallExpr(new NameExpr("Optional"), "empty"));
+        var ifNoNativeCode =
+                new IfStmt()
+                        .setCondition(
+                                new BinaryExpr(
+                                        new MethodCallExpr("loadNativeCode"),
+                                        new NullLiteralExpr(),
+                                        BinaryExpr.Operator.EQUALS))
+                        .setThenStmt(new BlockStmt(new NodeList<>(returnEmpty)));
+
+        var body = method.createBody();
+        body.addStatement(ifNoNativeCode);
+        body.addStatement(
+                new ReturnStmt(
+                        new MethodCallExpr(
+                                new NameExpr("NativeMachineFactoryProvider"), "discover")));
+    }
+
     private static void generateBuilderMethod(ClassOrInterfaceDeclaration type, String moduleName) {
         // Generates:
         // <code>
         //     public static Instance.Builder builder() {
         //         var module = load();
-        //         byte[][] nativeCode = loadNativeCode();
-        //         if (nativeCode != null) {
-        //             var provider = NativeMachineFactoryProvider.discover();
-        //             if (provider.isPresent()) {
-        //                 return provider.get().builder(module, nativeCode);
-        //             }
+        //         var provider = nativeProvider();
+        //         if (provider.isPresent()) {
+        //             return provider.get().builder(module, loadNativeCode());
         //         }
         //         return Instance.builder(module).withMachineFactory(<moduleName>::create);
         //     }
         // </code>
+        //
+        // The native path is selected through nativeProvider() so that callers
+        // checking it see exactly the decision this method makes. Falling back means
+        // the build-time compiled bytecode, not the interpreter.
         var method =
                 type.addMethod("builder", Modifier.Keyword.PUBLIC, Modifier.Keyword.STATIC)
                         .setType(parseClassOrInterfaceType("Instance.Builder"));
@@ -281,54 +337,35 @@ public final class RedlineGenerator {
                                 new VariableDeclarator(
                                         new VarType(), "module", new MethodCallExpr("load"))));
 
-        // byte[][] nativeCode = loadNativeCode();
-        var nativeCodeVar =
-                new ExpressionStmt(
-                        new VariableDeclarationExpr(
-                                new VariableDeclarator(
-                                        parseType("byte[][]"),
-                                        "nativeCode",
-                                        new MethodCallExpr("loadNativeCode"))));
-
-        // var provider = NativeMachineFactoryProvider.discover();
+        // var provider = nativeProvider();
         var providerVar =
                 new ExpressionStmt(
                         new VariableDeclarationExpr(
                                 new VariableDeclarator(
                                         new VarType(),
                                         "provider",
-                                        new MethodCallExpr(
-                                                new NameExpr("NativeMachineFactoryProvider"),
-                                                "discover"))));
+                                        new MethodCallExpr("nativeProvider"))));
 
-        // return provider.get().builder(module, nativeCode);
+        // return provider.get().builder(module, loadNativeCode());
         var returnNative =
                 new ReturnStmt(
                         new MethodCallExpr(
                                 new MethodCallExpr(new NameExpr("provider"), "get"),
                                 "builder",
                                 new NodeList<>(
-                                        new NameExpr("module"), new NameExpr("nativeCode"))));
+                                        new NameExpr("module"),
+                                        new MethodCallExpr("loadNativeCode"))));
 
         var ifProviderPresent =
                 new IfStmt()
                         .setCondition(new MethodCallExpr(new NameExpr("provider"), "isPresent"))
                         .setThenStmt(new BlockStmt(new NodeList<>(returnNative)));
 
-        var ifNativeCode =
-                new IfStmt()
-                        .setCondition(
-                                new BinaryExpr(
-                                        new NameExpr("nativeCode"),
-                                        new NullLiteralExpr(),
-                                        BinaryExpr.Operator.NOT_EQUALS))
-                        .setThenStmt(new BlockStmt(new NodeList<>(providerVar, ifProviderPresent)));
-
         var body = method.createBody();
         body.addStatement(moduleVar);
-        body.addStatement(nativeCodeVar);
-        body.addStatement(ifNativeCode);
-        body.addStatement(new ReturnStmt(interpreterBuilder(new NameExpr("module"), moduleName)));
+        body.addStatement(providerVar);
+        body.addStatement(ifProviderPresent);
+        body.addStatement(new ReturnStmt(compiledBuilder(new NameExpr("module"), moduleName)));
     }
 
     private static void generateSafeBuilderMethod(
@@ -345,11 +382,17 @@ public final class RedlineGenerator {
 
         method.createBody()
                 .addStatement(
-                        new ReturnStmt(interpreterBuilder(new MethodCallExpr("load"), moduleName)));
+                        new ReturnStmt(compiledBuilder(new MethodCallExpr("load"), moduleName)));
     }
 
-    /** {@code Instance.builder(<module>).withMachineFactory(<moduleName>::create)} */
-    private static MethodCallExpr interpreterBuilder(
+    /**
+     * {@code Instance.builder(<module>).withMachineFactory(<moduleName>::create)}
+     *
+     * <p>{@code create} returns the machine the build-time compiler emitted as JVM
+     * bytecode, so this is the compiled path, not the interpreter. The interpreter is
+     * only reached per-function, for functions too large to fit a JVM method.
+     */
+    private static MethodCallExpr compiledBuilder(
             com.github.javaparser.ast.expr.Expression module, String moduleName) {
         return new MethodCallExpr(
                 new MethodCallExpr(new NameExpr("Instance"), "builder", new NodeList<>(module)),

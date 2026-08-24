@@ -5,6 +5,8 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Serializes/deserializes pre-compiled native code (byte[][]).
@@ -54,22 +56,38 @@ public final class NativeCodeSerializer {
             throw new IOException("Unsupported native code version: " + version);
         }
         int count = dis.readInt();
-        byte[][] code = new byte[count][];
+        if (count < 0) {
+            throw new IOException("Invalid native code file: negative function count " + count);
+        }
+        // Collected rather than pre-allocated: a corrupt count would otherwise
+        // reserve up to 2^31 array slots before any read could reveal the file is
+        // truncated, turning a bad file into an OutOfMemoryError.
+        List<byte[]> code = new ArrayList<>(Math.min(count, 1024));
         for (int i = 0; i < count; i++) {
             int len = dis.readInt();
-            if (len > 0) {
-                code[i] = dis.readNBytes(len);
-                if (code[i].length != len) {
-                    throw new IOException(
-                            "Truncated native code for function "
-                                    + i
-                                    + ": expected "
-                                    + len
-                                    + " bytes, got "
-                                    + code[i].length);
-                }
+            if (len < 0) {
+                throw new IOException(
+                        "Invalid native code file: negative code length "
+                                + len
+                                + " for function "
+                                + i);
             }
+            if (len == 0) {
+                code.add(null);
+                continue;
+            }
+            byte[] func = dis.readNBytes(len);
+            if (func.length != len) {
+                throw new IOException(
+                        "Truncated native code for function "
+                                + i
+                                + ": expected "
+                                + len
+                                + " bytes, got "
+                                + func.length);
+            }
+            code.add(func);
         }
-        return code;
+        return code.toArray(new byte[0][]);
     }
 }

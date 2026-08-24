@@ -107,11 +107,7 @@ public class Cli implements Runnable {
         }
     }
 
-    public static int execute(String[] args) {
-        return new CommandLine(new Cli()).execute(args);
-    }
-
     public static void main(String[] args) {
-        System.exit(execute(args));
+        System.exit(new CommandLine(new Cli()).execute(args));
     }
 }

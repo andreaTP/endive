@@ -19,6 +19,23 @@ class RedlineE2eTest {
         assertEquals(50, provider.get().priority(), "JFFI should be selected with priority 50");
     }
 
+    /**
+     * Without this, every other test here still passes when the native path silently
+     * never engages, because the fallback is the build-time compiled bytecode and
+     * produces identical results.
+     */
+    @Test
+    public void builderActuallyUsesTheNativePath() {
+        assumeTrue(
+                RedlineTarget.detectHost().isPresent(),
+                "Host is not one of the Redline target platforms");
+        var provider = AddModule.nativeProvider();
+        assertTrue(
+                provider.isPresent(),
+                "builder() must take the native path, not fall back to compiled bytecode");
+        assertEquals(50, provider.get().priority(), "and it must be the JFFI runner");
+    }
+
     @Test
     public void nativeBuilderProducesCorrectResults() {
         try (var instance = AddModule.builder().build()) {
@@ -26,8 +43,8 @@ class RedlineE2eTest {
             assertArrayEquals(new long[] {3}, add.apply(1, 2));
             assertArrayEquals(new long[] {0}, add.apply(0, 0));
             assertEquals(
-                    (int) add.apply(0, -1)[0],
                     -1,
+                    (int) add.apply(0, -1)[0],
                     "i32 add(0, -1) should be -1 when narrowed to int");
         }
     }
@@ -39,8 +56,8 @@ class RedlineE2eTest {
             assertArrayEquals(new long[] {3}, add.apply(1, 2));
             assertArrayEquals(new long[] {0}, add.apply(0, 0));
             assertEquals(
-                    (int) add.apply(0, -1)[0],
                     -1,
+                    (int) add.apply(0, -1)[0],
                     "i32 add(0, -1) should be -1 when narrowed to int");
         }
     }
