@@ -91,7 +91,7 @@ public class EndiveCompilerGenMojo extends AbstractMojo {
      * for fine-grained control over which platforms to cross-compile for.
      */
     @Parameter(required = false)
-    List<String> redlineTargets;
+    List<String> redlineTargetsExperimental;
 
     /**
      * The current Maven project.
@@ -113,8 +113,8 @@ public class EndiveCompilerGenMojo extends AbstractMojo {
                         .withInterpreterFallback(interpreterFallback)
                         .withInterpretedFunctions(interpretedFunctions)
                         .withModuleInterface(moduleInterface);
-        if (redlineTargets != null && !redlineTargets.isEmpty()) {
-            configBuilder.withRedlineTargets(redlineTargets);
+        if (redlineTargetsExperimental != null && !redlineTargetsExperimental.isEmpty()) {
+            configBuilder.withRedlineTargets(redlineTargetsExperimental);
         } else if (redlineExperimental) {
             configBuilder.withRedlineTargets(RedlineGenerator.allTargets());
         }
