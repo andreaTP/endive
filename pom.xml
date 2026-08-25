@@ -54,6 +54,15 @@
 
     <approvaltests.version>31.0.0</approvaltests.version>
     <asm.version>9.10.1</asm.version>
+    <!--
+      OCI tag of the prebuilt cranelift_bridge.wasm that redline/bridge compiles
+      against, published by .github/workflows/wasm-publish.yaml. Must be valid
+      semver: the wkg.lock format rejects tags like "latest", and the Maven
+      version scheme (999-SNAPSHOT) is not semver, so this cannot simply reuse
+      ${project.version}. Bump to an immutable released tag before cutting a
+      release, so the published jars can be rebuilt from source.
+    -->
+    <cranelift-bridge.version>999.0.0-SNAPSHOT</cranelift-bridge.version>
     <commons-io.version>2.22.0</commons-io.version>
     <commons-lang.version>3.20.0</commons-lang.version>
     <jackson-annotations.version>2.22</jackson-annotations.version>
@@ -93,6 +102,7 @@
     <maven-invoker-plugin.version>3.10.1</maven-invoker-plugin.version>
     <central-publishing-maven-plugin.version>0.11.0</central-publishing-maven-plugin.version>
     <exec-maven-plugin.version>3.6.3</exec-maven-plugin.version>
+    <inlay-maven-plugin.version>0.0.3</inlay-maven-plugin.version>
     <spotless-maven-plugin.version>3.9.0</spotless-maven-plugin.version>
     <templating-maven-plugin.version>3.1.0</templating-maven-plugin.version>
     <maven-file-management.version>3.2.0</maven-file-management.version>
@@ -270,6 +280,11 @@
       </dependency>
       <dependency>
         <groupId>run.endive</groupId>
+        <artifactId>redline-build-time-compiler-experimental</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>run.endive</groupId>
         <artifactId>redline-compiler-experimental</artifactId>
         <version>${project.version}</version>
       </dependency>
@@ -408,6 +423,11 @@
           <groupId>com.diffplug.spotless</groupId>
           <artifactId>spotless-maven-plugin</artifactId>
           <version>${spotless-maven-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>io.roastedroot</groupId>
+          <artifactId>inlay-maven-plugin</artifactId>
+          <version>${inlay-maven-plugin.version}</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
@@ -1031,13 +1051,6 @@
     </profile>
 
     <profile>
-      <id>redline</id>
-      <modules>
-        <module>redline</module>
-      </modules>
-    </profile>
-
-    <profile>
       <id>default-all-modules</id>
       <activation>
         <property>
@@ -1062,6 +1075,7 @@
         <module>jmh</module>
         <module>log</module>
         <module>machine-tests</module>
+        <module>redline</module>
         <module>runtime</module>
         <module>runtime-tests</module>
         <module>test-gen-lib</module>

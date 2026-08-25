@@ -27,6 +27,15 @@ public enum RedlineTarget {
         return resourceSuffix;
     }
 
+    public static Optional<RedlineTarget> fromTriple(String triple) {
+        for (RedlineTarget target : values()) {
+            if (target.triple.equals(triple)) {
+                return Optional.of(target);
+            }
+        }
+        return Optional.empty();
+    }
+
     public static Optional<RedlineTarget> detectHost() {
         String osName =
                 System.getProperty("endive.redline.os.name", System.getProperty("os.name", ""))
@@ -36,6 +45,15 @@ public enum RedlineTarget {
                         .toLowerCase(Locale.ROOT);
 
         boolean isAarch64 = arch.equals("aarch64") || arch.equals("arm64");
+        boolean isX8664 = arch.equals("x86_64") || arch.equals("amd64") || arch.equals("x64");
+
+        // An unrecognised architecture must yield empty rather than defaulting to
+        // x86_64: the caller uses this to pick a native code blob, and handing
+        // x86_64 machine code to, say, riscv64 crashes the JVM instead of falling
+        // back to the build-time compiler.
+        if (!isAarch64 && !isX8664) {
+            return Optional.empty();
+        }
 
         if (osName.contains("linux")) {
             return Optional.of(isAarch64 ? LINUX_AARCH64 : LINUX_X86_64);

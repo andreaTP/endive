@@ -86,6 +86,36 @@ Basic steps:
 
 note: if you're working using a *corporate proxy* (or anything like this), you might need to pass the usual `-Dhttps.proxyHost=...` and `-Dhttps.proxyPort=...` in order to properly instruct Maven about this (this can be required for example for `test-gen-plugin` since it downloads the testsuite).
 
+### Redline and the Cranelift bridge
+
+The experimental redline native compiler needs `cranelift_bridge.wasm`, a Rust crate compiled to `wasm32-wasip1`. **You do not need a Rust toolchain to build Endive.** The [inlay](https://github.com/roastedroot/inlay) Maven plugin downloads a prebuilt copy from GHCR during `generate-sources`, pinned by digest in `redline/wkg.lock`, so a fresh clone builds with a plain `mvn clean install`.
+
+To work on the Rust side you do need Rust with the `wasm32-wasip1` target:
+
+* `make -C redline/wasm-build all` builds `redline/cranelift_bridge.wasm` (gitignored)
+* inlay skips the download whenever that file already exists, so your local build picks it up
+
+That skip has a sharp edge: a **stale** `redline/cranelift_bridge.wasm` left over from an earlier `make all` silently shadows the pinned artifact, and you end up testing against a different bridge than CI. Delete the file to go back to the published one.
+
+Publishing is handled by `.github/workflows/wasm-publish.yaml`. Pushes to `main` touching `redline/wasm-build/**` refresh the development snapshot; a manual dispatch can publish any semver tag. The tag must be valid semver — the `wkg.lock` format rejects `latest` — and the workflow validates that before pushing anything.
+
+Which tag the build consumes is the `cranelift-bridge.version` property in the root `pom.xml`. Publishing does **not** update it, and does **not** refresh the lock file: until both are updated the build keeps resolving the previously pinned digest, and re-pushing an already-locked tag makes every build fail with a digest mismatch rather than silently drifting.
+
+To adopt a published wasm (the workflow prints these in its job summary):
+
+```bash
+# 1. point the build at the tag that was published
+./mvnw versions:set-property -Dproperty=cranelift-bridge.version \
+    -DnewVersion=<version> -DgenerateBackupPoms=false
+
+# 2. re-pin the digest
+./mvnw generate-sources -pl :redline-bridge-experimental -Dinlay.update
+
+# 3. commit pom.xml and redline/wkg.lock together
+```
+
+**Releases handle this automatically.** `release.yaml` retags the digest currently pinned in `wkg.lock` as the release version, points the property at it, re-pins the lock, and commits both alongside the version bump — so every release has a matching immutable wasm artifact, byte-identical to the one CI tested. It retags rather than rebuilding, so the release needs no Rust toolchain. Afterwards it restores the snapshot property, and a guard refuses to deploy if the property still resolves to a `SNAPSHOT` tag.
+
 ### Proposals implementation
 
 Our priority is to focus on implementing [proposals](https://github.com/WebAssembly/proposals) that are in the most advanced stages of development. While we wholeheartedly encourage and support explorations, we’ll be dedicating less time to early-stage proposals until we have more comprehensive support for those that are stabilized.

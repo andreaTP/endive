@@ -13,16 +13,34 @@
   <name>Endive - Redline</name>
   <description>Redline native compiler for WebAssembly</description>
 
-  <!-- Java 11 modules — always build -->
+  <!-- Published Java 11 modules -->
   <modules>
     <module>api</module>
     <module>bridge</module>
+    <module>build-time-compiler</module>
     <module>compiler</module>
     <module>runner-jffi</module>
-    <module>runner-jffi-tests</module>
   </modules>
 
   <profiles>
+    <!--
+      Test-only modules, kept out of the release reactor the same way the root
+      pom keeps its own: they publish nothing, so building them during a release
+      only adds risk and time.
+    -->
+    <profile>
+      <id>default-redline-test-modules</id>
+      <activation>
+        <property>
+          <name>!release</name>
+        </property>
+      </activation>
+      <modules>
+        <module>it</module>
+        <module>runner-jffi-tests</module>
+      </modules>
+    </profile>
+
     <profile>
       <id>java25</id>
       <activation>
@@ -30,6 +48,19 @@
       </activation>
       <modules>
         <module>runner</module>
+      </modules>
+    </profile>
+
+    <!-- Panama spec tests: JDK 25+, and test-only, so excluded from releases. -->
+    <profile>
+      <id>java25-test-modules</id>
+      <activation>
+        <jdk>[25,)</jdk>
+        <property>
+          <name>!release</name>
+        </property>
+      </activation>
+      <modules>
         <module>runner-tests</module>
       </modules>
     </profile>

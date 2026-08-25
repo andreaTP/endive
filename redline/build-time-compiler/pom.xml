@@ -8,29 +8,31 @@
     <version>999-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
-  <artifactId>redline-api-experimental</artifactId>
+  <artifactId>redline-build-time-compiler-experimental</artifactId>
   <packaging>jar</packaging>
-  <name>Endive - Redline API</name>
-  <description>Redline native compiler API</description>
+  <name>Endive - Redline Build Time Compiler</name>
+  <description>Build-time native code generation via Cranelift</description>
 
   <dependencies>
     <dependency>
+      <groupId>com.github.javaparser</groupId>
+      <artifactId>javaparser-core</artifactId>
+    </dependency>
+    <dependency>
       <groupId>run.endive</groupId>
-      <artifactId>runtime</artifactId>
+      <artifactId>build-time-compiler</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>run.endive</groupId>
+      <artifactId>redline-api-experimental</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>run.endive</groupId>
+      <artifactId>redline-compiler-experimental</artifactId>
     </dependency>
     <dependency>
       <groupId>run.endive</groupId>
       <artifactId>wasm</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.junit.jupiter</groupId>
-      <artifactId>junit-jupiter-api</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.junit.jupiter</groupId>
-      <artifactId>junit-jupiter-engine</artifactId>
-      <scope>test</scope>
     </dependency>
   </dependencies>
 </project>
