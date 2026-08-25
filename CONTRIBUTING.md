@@ -86,6 +86,30 @@ Basic steps:
 
 note: if you're working using a *corporate proxy* (or anything like this), you might need to pass the usual `-Dhttps.proxyHost=...` and `-Dhttps.proxyPort=...` in order to properly instruct Maven about this (this can be required for example for `test-gen-plugin` since it downloads the testsuite).
 
+### Redline and the Cranelift bridge
+
+The experimental redline native compiler needs `cranelift_bridge.wasm`, a Rust crate compiled to `wasm32-wasip1`. **You do not need a Rust toolchain to build Endive.** The [inlay](https://github.com/roastedroot/inlay) Maven plugin downloads a prebuilt copy from GHCR during `generate-sources`, pinned by digest in `redline/wkg.lock`, so a fresh clone builds with a plain `mvn clean install`.
+
+To work on the Rust side you do need Rust with the `wasm32-wasip1` target:
+
+* `make -C redline/wasm-build all` builds `redline/cranelift_bridge.wasm` (gitignored)
+* inlay skips the download whenever that file already exists, so your local build picks it up
+
+That skip has a sharp edge: a **stale** `redline/cranelift_bridge.wasm` left over from an earlier `make all` silently shadows the pinned artifact, and you end up testing against a different bridge than CI. Delete the file to go back to the published one.
+
+Publishing is handled by `.github/workflows/wasm-publish.yaml`, which runs on pushes to `main` touching `redline/wasm-build/**`, or on manual dispatch, and pushes to `ghcr.io/bytecodealliance/endive-cranelift-bridge`. Two constraints are easy to trip over:
+
+* the tag must be valid semver — the `wkg.lock` format rejects `latest`
+* `WASM_VERSION` in that workflow must match the `imageRef` in `redline/bridge/pom.xml`, otherwise you publish something no build consumes
+
+Publishing does **not** update the lock file. Until it is refreshed, builds keep resolving the previously pinned digest, and if the same tag was re-pushed inlay fails with a digest mismatch instead of silently drifting. Refresh it with:
+
+```bash
+./mvnw generate-sources -pl :redline-bridge-experimental -Dinlay.update
+```
+
+then commit the updated `redline/wkg.lock`.
+
 ### Proposals implementation
 
 Our priority is to focus on implementing [proposals](https://github.com/WebAssembly/proposals) that are in the most advanced stages of development. While we wholeheartedly encourage and support explorations, we’ll be dedicating less time to early-stage proposals until we have more comprehensive support for those that are stabilized.
