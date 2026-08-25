@@ -114,7 +114,7 @@ To adopt a published wasm (the workflow prints these in its job summary):
 # 3. commit pom.xml and redline/wkg.lock together
 ```
 
-**Before cutting a release**, publish an immutable release tag (say `1.2.0`) via workflow dispatch and adopt it with the steps above. Releasing while the property still points at `999.0.0-SNAPSHOT` produces jars built from a mutable tag: once that tag is re-pushed the release can no longer be rebuilt from its git tag, because the pinned digest no longer resolves.
+**Releases handle this automatically.** `release.yaml` retags the digest currently pinned in `wkg.lock` as the release version, points the property at it, re-pins the lock, and commits both alongside the version bump — so every release has a matching immutable wasm artifact, byte-identical to the one CI tested. It retags rather than rebuilding, so the release needs no Rust toolchain. Afterwards it restores the snapshot property, and a guard refuses to deploy if the property still resolves to a `SNAPSHOT` tag.
 
 ### Proposals implementation
 

@@ -51,6 +51,38 @@ jobs:
           git config user.name "Endive BOT"
           git config user.email "endive@bytecodealliance.org"
 
+      - name: Install ORAS
+        uses: oras-project/setup-oras@v1
+
+      # Jars must be built against an immutable wasm tag: the development
+      # snapshot is mutable, so a release built against it stops being
+      # reproducible the moment that tag moves.
+      #
+      # This retags the digest already pinned in wkg.lock rather than rebuilding
+      # from Rust, so the released wasm is byte-identical to the one CI tested
+      # and no toolchain is needed here.
+      - name: Publish the bridge wasm under the release version
+        run: |
+          set -euo pipefail
+          DIGEST=$(grep -oE 'sha256:[0-9a-f]{64}' redline/wkg.lock | head -1 || true)
+          if [ -z "$DIGEST" ]; then
+            echo "::error::No digest found in redline/wkg.lock"
+            exit 1
+          fi
+          echo "Retagging $DIGEST as $VERSION"
+          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u ${{ github.actor }} --password-stdin
+          oras tag "ghcr.io/bytecodealliance/endive-cranelift-bridge@${DIGEST}" "$VERSION"
+        env:
+          VERSION: ${{ github.event.inputs.release-version }}
+
+      # Runs before "Set the version" so the property and lock changes are
+      # swept into the release commit by its "git add ." below.
+      - name: Pin the build to the released wasm
+        run: |
+          ./mvnw versions:set-property -Dproperty=cranelift-bridge.version \
+              -DnewVersion=${{ github.event.inputs.release-version }} -DgenerateBackupPoms=false
+          ./mvnw generate-sources -pl :redline-bridge-experimental -Dinlay.update
+
       - name: Set the version
         run: |
           ./mvnw versions:set -DgenerateBackupPoms=false -DnewVersion=${{ github.event.inputs.release-version }}
@@ -61,6 +93,20 @@ jobs:
           git push origin ${{ github.event.inputs.release-version }}
         env:
           GITHUB_TOKEN: ${{secrets.GH_TOKEN}}
+
+      # Last line of defence: if the steps above were skipped or edited away, the
+      # jars would be built from a mutable tag and could not be rebuilt later.
+      - name: Verify the bridge wasm tag is immutable
+        run: |
+          set -euo pipefail
+          v=$(./mvnw help:evaluate -Dexpression=cranelift-bridge.version -q -DforceStdout)
+          echo "cranelift-bridge.version = $v"
+          case "$v" in
+            *SNAPSHOT*)
+              echo "::error::Refusing to release jars built against the mutable wasm tag '$v'"
+              exit 1
+              ;;
+          esac
 
       - name: Release to Maven Central
         run: |
@@ -75,6 +121,9 @@ jobs:
       - name: Back to Snapshot
         run: |
           ./mvnw versions:set -DgenerateBackupPoms=false -DnewVersion=999-SNAPSHOT
+          ./mvnw versions:set-property -Dproperty=cranelift-bridge.version \
+              -DnewVersion=999.0.0-SNAPSHOT -DgenerateBackupPoms=false
+          ./mvnw generate-sources -pl :redline-bridge-experimental -Dinlay.update
           git add .
           git commit -m "Snapshot version update"
           git push
