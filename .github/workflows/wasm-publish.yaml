@@ -59,10 +59,15 @@ jobs:
       # annotation is a bare filename. A path like "redline/cranelift_bridge.wasm"
       # makes the OCI client try to write into a directory that does not exist
       # on pull.
+      #
+      # The source annotation links the package to this repository, which is what
+      # lets GITHUB_TOKEN write to it from Actions and makes it show up under the
+      # repo's packages.
       - name: Push to GHCR
         working-directory: redline
         run: |
           oras push \
+            --annotation "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             ghcr.io/bytecodealliance/endive-cranelift-bridge:${WASM_VERSION} \
             cranelift_bridge.wasm:application/wasm
 
