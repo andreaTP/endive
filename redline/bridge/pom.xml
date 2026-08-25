@@ -46,7 +46,7 @@
             <configuration>
               <modules>
                 <module>
-                  <imageRef>ghcr.io/bytecodealliance/endive-cranelift-bridge:999.0.0-SNAPSHOT</imageRef>
+                  <imageRef>ghcr.io/bytecodealliance/endive-cranelift-bridge:${cranelift-bridge.version}</imageRef>
                   <outputFile>${project.basedir}/../cranelift_bridge.wasm</outputFile>
                 </module>
               </modules>

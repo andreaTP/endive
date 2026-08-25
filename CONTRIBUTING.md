@@ -97,18 +97,24 @@ To work on the Rust side you do need Rust with the `wasm32-wasip1` target:
 
 That skip has a sharp edge: a **stale** `redline/cranelift_bridge.wasm` left over from an earlier `make all` silently shadows the pinned artifact, and you end up testing against a different bridge than CI. Delete the file to go back to the published one.
 
-Publishing is handled by `.github/workflows/wasm-publish.yaml`, which runs on pushes to `main` touching `redline/wasm-build/**`, or on manual dispatch, and pushes to `ghcr.io/bytecodealliance/endive-cranelift-bridge`. Two constraints are easy to trip over:
+Publishing is handled by `.github/workflows/wasm-publish.yaml`. Pushes to `main` touching `redline/wasm-build/**` refresh the development snapshot; a manual dispatch can publish any semver tag. The tag must be valid semver — the `wkg.lock` format rejects `latest` — and the workflow validates that before pushing anything.
 
-* the tag must be valid semver — the `wkg.lock` format rejects `latest`
-* `WASM_VERSION` in that workflow must match the `imageRef` in `redline/bridge/pom.xml`, otherwise you publish something no build consumes
+Which tag the build consumes is the `cranelift-bridge.version` property in the root `pom.xml`. Publishing does **not** update it, and does **not** refresh the lock file: until both are updated the build keeps resolving the previously pinned digest, and re-pushing an already-locked tag makes every build fail with a digest mismatch rather than silently drifting.
 
-Publishing does **not** update the lock file. Until it is refreshed, builds keep resolving the previously pinned digest, and if the same tag was re-pushed inlay fails with a digest mismatch instead of silently drifting. Refresh it with:
+To adopt a published wasm (the workflow prints these in its job summary):
 
 ```bash
+# 1. point the build at the tag that was published
+./mvnw versions:set-property -Dproperty=cranelift-bridge.version \
+    -DnewVersion=<version> -DgenerateBackupPoms=false
+
+# 2. re-pin the digest
 ./mvnw generate-sources -pl :redline-bridge-experimental -Dinlay.update
+
+# 3. commit pom.xml and redline/wkg.lock together
 ```
 
-then commit the updated `redline/wkg.lock`.
+**Before cutting a release**, publish an immutable release tag (say `1.2.0`) via workflow dispatch and adopt it with the steps above. Releasing while the property still points at `999.0.0-SNAPSHOT` produces jars built from a mutable tag: once that tag is re-pushed the release can no longer be rebuilt from its git tag, because the pinned digest no longer resolves.
 
 ### Proposals implementation
 
