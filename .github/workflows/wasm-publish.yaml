@@ -8,15 +8,12 @@ on:
     inputs:
       version:
         description: >-
-          Semver tag to publish, e.g. 1.2.0. Use an immutable release tag when
-          preparing a release; leave the default to refresh the development
-          snapshot. Must be valid semver: wkg.lock rejects tags like "latest".
+          Semver tag to publish, e.g. 1.2.0. Leave the default to refresh the
+          development snapshot. Must be valid semver: wkg.lock rejects "latest".
         required: true
         default: 999.0.0-SNAPSHOT
 
-# Pushes to main refresh the development snapshot; a manual run can publish any
-# semver tag. Must match cranelift-bridge.version in the root pom.xml for the
-# build to actually consume what was published.
+# Must match cranelift-bridge.version in the root pom.xml to be consumed.
 env:
   WASM_VERSION: ${{ inputs.version || '999.0.0-SNAPSHOT' }}
 
@@ -24,15 +21,13 @@ jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
       id-token: write
     steps:
       - name: Checkout sources
         uses: actions/checkout@v7
 
-      # Catches "latest", "1.2" and similar before anything is pushed: an
-      # unparseable tag only fails later, when a consumer writes wkg.lock.
       - name: Validate version is semver
         run: |
           if ! echo "$WASM_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
@@ -55,14 +50,9 @@ jobs:
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      # Pushed from inside redline/ so the org.opencontainers.image.title
-      # annotation is a bare filename. A path like "redline/cranelift_bridge.wasm"
-      # makes the OCI client try to write into a directory that does not exist
-      # on pull.
-      #
-      # The source annotation links the package to this repository, which is what
-      # lets GITHUB_TOKEN write to it from Actions and makes it show up under the
-      # repo's packages.
+      # From redline/ so the image title is a bare filename; a path makes the
+      # client write into a non-existent directory on pull. The source
+      # annotation links the package to the repo, granting GITHUB_TOKEN write.
       - name: Push to GHCR
         working-directory: redline
         run: |
@@ -71,26 +61,36 @@ jobs:
             ghcr.io/bytecodealliance/endive-cranelift-bridge:${WASM_VERSION} \
             cranelift_bridge.wasm:application/wasm
 
-      - name: Next steps
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: maven
+
+      # Rust is not byte-reproducible, so every publish yields a new digest. A
+      # stale lock breaks main and every open PR, so re-pin in the same run.
+      - name: Re-pin wkg.lock on main
+        if: github.ref == 'refs/heads/main'
         run: |
-          {
-            echo "Published \`$WASM_VERSION\`."
-            echo
-            echo "Publishing does not update the lock file. Until it is refreshed the"
-            echo "build keeps resolving the previously pinned digest, and re-pushing an"
-            echo "already-locked tag makes every build fail with a digest mismatch."
-            echo
-            echo "To consume it:"
-            echo
-            echo '```bash'
-            echo "# 1. point the build at this tag"
-            echo "./mvnw versions:set-property -Dproperty=cranelift-bridge.version \\"
-            echo "    -DnewVersion=$WASM_VERSION -DgenerateBackupPoms=false"
-            echo
-            echo "# 2. re-pin the digest"
-            echo "./mvnw generate-sources -pl :redline-bridge-experimental -Dinlay.update"
-            echo
-            echo "# 3. commit both"
-            echo "git commit -am 'Use cranelift_bridge.wasm $WASM_VERSION'"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+
+          # Builds before committing, so a wasm that does not build is never pinned.
+          ./mvnw -B -Dquickly -Dinlay.update
+
+          if git diff --quiet -- redline/wkg.lock; then
+            echo "Lock already matches the published digest."
+            exit 0
+          fi
+
+          git config user.name "Endive BOT"
+          git config user.email "endive@bytecodealliance.org"
+          git add redline/wkg.lock
+          git commit -m "Re-pin cranelift_bridge.wasm"
+          git pull --rebase
+          git push
+
+      - name: Summary
+        run: |
+          echo "Published \`$WASM_VERSION\`. Open pull requests need a rebase to" \
+               "pick up the re-pinned lock." >> "$GITHUB_STEP_SUMMARY"
