@@ -14,8 +14,18 @@ public final class JffiNativeGlobalInstance extends GlobalInstance {
 
     private static final MemoryIO MEM = MemoryIO.getInstance();
 
-    private final long bufferAddress;
-    private final long offset;
+    // Not final: an imported global is built before the instance that will use it
+    // exists, so it starts out on its own buffer and is moved onto the machine's
+    // globals buffer by rebind() once there is one. See JffiNativeMachine.
+    private long bufferAddress;
+    private long offset;
+
+    /**
+     * True while this global sits on a buffer of its own rather than inside some
+     * machine's globals buffer. Only such a global may be moved: one a module
+     * exports is already where that module's compiled code reads it.
+     */
+    private boolean standalone;
 
     public JffiNativeGlobalInstance(
             long bufferAddress,
@@ -28,6 +38,36 @@ public final class JffiNativeGlobalInstance extends GlobalInstance {
         this.offset = (long) index * 8;
         // Write initial value to buffer
         MEM.putLong(bufferAddress + offset, initialValue);
+    }
+
+    /**
+     * A global for the host to pass in as an import, on storage of its own until the
+     * instance that receives it adopts it.
+     */
+    public static JffiNativeGlobalInstance standalone(
+            long initialValue, ValType valType, MutabilityType mutabilityType) {
+        var global =
+                new JffiNativeGlobalInstance(
+                        MEM.allocateMemory(8, true), 0, initialValue, valType, mutabilityType);
+        global.standalone = true;
+        return global;
+    }
+
+    boolean isStandalone() {
+        return standalone;
+    }
+
+    /**
+     * Moves this global onto the buffer compiled code reads, carrying its current
+     * value across. Both sides then share the same eight bytes, so neither can go
+     * stale while the other writes.
+     */
+    void rebind(long target, int index) {
+        long current = getValue();
+        this.bufferAddress = target;
+        this.offset = (long) index * 8;
+        this.standalone = false;
+        MEM.putLong(target + offset, current);
     }
 
     @Override

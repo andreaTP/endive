@@ -79,8 +79,7 @@ public final class JffiNativeMachineFactory {
 
     public static GlobalInstance createImportGlobal(
             long value, ValType type, MutabilityType mutability) {
-        long addr = MEM.allocateMemory(8, true);
-        return new JffiNativeGlobalInstance(addr, 0, value, type, mutability);
+        return JffiNativeGlobalInstance.standalone(value, type, mutability);
     }
 
     public static Memory createMemory(MemoryLimits limits) {

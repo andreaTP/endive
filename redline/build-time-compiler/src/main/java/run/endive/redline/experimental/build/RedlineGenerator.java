@@ -92,6 +92,7 @@ public final class RedlineGenerator {
         var type = cu.getClassByName(baseName).orElseThrow();
 
         cu.addImport("run.endive.redline.experimental.api.NativeCodeSerializer");
+        cu.addImport("run.endive.redline.experimental.api.ImportFactory");
         cu.addImport("run.endive.redline.experimental.api.NativeMachineFactoryProvider");
         cu.addImport("run.endive.redline.experimental.api.internal.RedlineTarget");
         cu.addImport("java.io.InputStream");
@@ -103,6 +104,7 @@ public final class RedlineGenerator {
         generateLoadNativeCodeMethod(type);
         generateNativeProviderMethod(type);
         generateBuilderMethod(type, baseName);
+        generateImportsMethod(type);
         generateSafeBuilderMethod(type, baseName);
 
         Files.writeString(sourceFile, cu.toString());
@@ -308,6 +310,24 @@ public final class RedlineGenerator {
                 new ReturnStmt(
                         new MethodCallExpr(
                                 new NameExpr("NativeMachineFactoryProvider"), "discover")));
+    }
+
+    private static void generateImportsMethod(ClassOrInterfaceDeclaration type) {
+        // Generates:
+        // <code>
+        //     public static ImportFactory imports() {
+        //         return ImportFactory.forNativeCode(loadNativeCode());
+        //     }
+        // </code>
+        type.addMethod("imports", Modifier.Keyword.PUBLIC, Modifier.Keyword.STATIC)
+                .setType(parseClassOrInterfaceType("ImportFactory"))
+                .createBody()
+                .addStatement(
+                        new ReturnStmt(
+                                new MethodCallExpr(
+                                        new NameExpr("ImportFactory"),
+                                        "forNativeCode",
+                                        new NodeList<>(new MethodCallExpr("loadNativeCode")))));
     }
 
     private static void generateBuilderMethod(ClassOrInterfaceDeclaration type, String moduleName) {

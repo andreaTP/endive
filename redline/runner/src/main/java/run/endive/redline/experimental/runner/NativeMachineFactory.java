@@ -78,8 +78,7 @@ public final class NativeMachineFactory {
 
     public static GlobalInstance createImportGlobal(
             long value, ValType type, MutabilityType mutability) {
-        var buf = Arena.ofAuto().allocate(8, 8);
-        return new NativeGlobalInstance(buf, 0, value, type, mutability);
+        return NativeGlobalInstance.standalone(value, type, mutability);
     }
 
     public static Memory createMemory(MemoryLimits limits) {

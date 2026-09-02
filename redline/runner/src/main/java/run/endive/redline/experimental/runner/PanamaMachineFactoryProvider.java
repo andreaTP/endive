@@ -1,12 +1,15 @@
 package run.endive.redline.experimental.runner;
 
 import run.endive.redline.experimental.api.NativeMachineFactoryProvider;
+import run.endive.runtime.GlobalInstance;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Memory;
 import run.endive.runtime.TableInstance;
 import run.endive.wasm.WasmModule;
 import run.endive.wasm.types.MemoryLimits;
+import run.endive.wasm.types.MutabilityType;
 import run.endive.wasm.types.Table;
+import run.endive.wasm.types.Value;
 
 public final class PanamaMachineFactoryProvider implements NativeMachineFactoryProvider {
 
@@ -25,6 +28,11 @@ public final class PanamaMachineFactoryProvider implements NativeMachineFactoryP
     @Override
     public TableInstance createImportTable(Table table, int initValue) {
         return NativeMachineFactory.createImportTable(table, initValue);
+    }
+
+    @Override
+    public GlobalInstance createImportGlobal(Value value, MutabilityType mutability) {
+        return NativeMachineFactory.createImportGlobal(value.raw(), value.type(), mutability);
     }
 
     @Override

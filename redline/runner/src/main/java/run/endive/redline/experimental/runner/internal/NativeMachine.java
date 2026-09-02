@@ -840,12 +840,26 @@ public final class NativeMachine implements Machine {
     // --- Globals initialization ---
 
     /**
+     * Compiled code reaches an import through a raw address, so it can only use one
+     * this backend built. The message points at the module's own factory rather than
+     * a backend-specific one, because that is what works on every platform.
+     */
+    private static String foreignImportMessage(String kind, Object actual) {
+        return "this module is running natively compiled code, which can only use an imported "
+                + kind
+                + " created by the same backend, but got "
+                + actual.getClass().getName()
+                + ". Create it through the generated module's imports() factory, which picks"
+                + " the right one whether or not native code is available on this platform.";
+    }
+
+    /**
      * Lazily replace module-defined GlobalInstance objects with NativeGlobalInstance
      * backed by the off-heap globalsBuffer. Called once on first native call,
      * after Instance.initialize() has created the original GlobalInstance objects.
      *
-     * For imported globals, we copy their current value into the buffer (read-only
-     * from native code's perspective — imported mutable globals are rare).
+     * An imported global is moved onto the same buffer rather than copied into it,
+     * so that what the module writes stays visible through the caller's own object.
      */
     private void initializeImportGlobals() {
         if (importGlobalsInitialized || globalCount == 0) {
@@ -854,7 +868,6 @@ public final class NativeMachine implements Machine {
         importGlobalsInitialized = true;
 
         // Module-defined globals are already NativeGlobalInstance (created by globalFactory).
-        // Only need to copy imported global values into the shared buffer.
         int importGlobalCount =
                 (int)
                         instance.module().importSection().stream()
@@ -866,7 +879,20 @@ public final class NativeMachine implements Machine {
                                 .count();
 
         for (int i = 0; i < importGlobalCount; i++) {
-            globalsBuffer.set(ValueLayout.JAVA_LONG, (long) i * 8, instance.global(i).getValue());
+            var global = instance.global(i);
+            if (!(global instanceof NativeGlobalInstance nativeGlobal)) {
+                throw new WasmEngineException(foreignImportMessage("global", global));
+            }
+            if (nativeGlobal.isStandalone()) {
+                // Passed in by the host: adopt it, so what this module writes stays
+                // visible through the caller's own object.
+                nativeGlobal.rebind(globalsBuffer, i);
+            } else {
+                // Exported by another module, and already sitting where that
+                // module's compiled code reads it. Its storage cannot move, so this
+                // module starts from its current value.
+                globalsBuffer.set(ValueLayout.JAVA_LONG, (long) i * 8, nativeGlobal.getValue());
+            }
         }
     }
 
@@ -897,15 +923,7 @@ public final class NativeMachine implements Machine {
                 nt.resolvePendingRefs(instance);
                 nativeTables[i] = nt;
             } else {
-                // Imported table not created by our factory — wrap it
-                var tableDef = new run.endive.wasm.types.Table(table.elementType(), table.limits());
-                var nt =
-                        new NativeTable(
-                                tableDef, run.endive.wasm.types.Value.REF_NULL_VALUE, arena);
-                for (int j = 0; j < table.size(); j++) {
-                    nt.setRef(j, table.ref(j), instance);
-                }
-                nativeTables[i] = nt;
+                throw new WasmEngineException(foreignImportMessage("table", table));
             }
 
             tablePtrsArray.set(
@@ -1049,11 +1067,7 @@ public final class NativeMachine implements Machine {
                             CtxBuffer.MEM_BASE_ADDR,
                             cachedMemBase.address());
                 } else if (mem != null) {
-                    throw new WasmEngineException(
-                            "NativeMachine requires NativeMemory but got "
-                                    + mem.getClass().getName()
-                                    + ". Use NativeMachineFactory.createMemory() for all"
-                                    + " memories, including imports.");
+                    throw new WasmEngineException(foreignImportMessage("memory", mem));
                 } else {
                     cachedMemBase = MemorySegment.NULL;
                 }
