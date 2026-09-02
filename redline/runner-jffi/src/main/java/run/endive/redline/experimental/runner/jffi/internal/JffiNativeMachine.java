@@ -22,6 +22,8 @@ import run.endive.redline.experimental.api.internal.TypeMapUtils;
 import run.endive.redline.experimental.bridge.internal.CraneliftBridge;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Machine;
+import run.endive.runtime.TrapException;
+import run.endive.runtime.WasmRuntimeException;
 import run.endive.wasm.WasmEngineException;
 import run.endive.wasm.types.FunctionType;
 import run.endive.wasm.types.ValType;
@@ -99,7 +101,10 @@ public final class JffiNativeMachine implements Machine {
     private final long funcTypesArraySize; // byte size
     private long tablePtrsArrayAddr;
     private JffiNativeTable[] nativeTables;
+    private boolean[] ownsTable;
     private boolean tablesInitialized;
+    private boolean ownsMemory;
+    private boolean closed;
     private final int numImports;
     private final int globalCount;
     private boolean importGlobalsInitialized;
@@ -107,6 +112,7 @@ public final class JffiNativeMachine implements Machine {
     private boolean memBaseInitialized;
     private JffiNativeMemory nativeMemory;
     private volatile Throwable pendingException;
+    private int callDepth;
 
     // Keep closure handles alive to prevent GC
     private final Closure.Handle trampolineHandle;
@@ -384,11 +390,27 @@ public final class JffiNativeMachine implements Machine {
                 instance.memory() instanceof JffiNativeMemory
                         ? (JffiNativeMemory) instance.memory()
                         : null;
+        // An imported memory outlives this instance and may back others, so only
+        // a memory this module defines is ours to close.
+        this.ownsMemory = instance.imports().memoryCount() == 0;
     }
 
     @Override
     public void close() {
-        if (nativeMemory != null) {
+        if (closed) {
+            // Every free below is a native one, so a second close would be a
+            // double free rather than a no-op.
+            return;
+        }
+        closed = true;
+        if (ownsTable != null) {
+            for (int i = 0; i < ownsTable.length; i++) {
+                if (ownsTable[i]) {
+                    nativeTables[i].free();
+                }
+            }
+        }
+        if (nativeMemory != null && ownsMemory) {
             nativeMemory.close();
         }
         if (tablePtrsArrayAddr != 0) {
@@ -474,6 +496,10 @@ public final class JffiNativeMachine implements Machine {
         Type returnType;
         if (funcType.returns().isEmpty()) {
             returnType = Type.VOID;
+        } else if (funcType.returns().size() > 1) {
+            // Multi-return follows the compiled convention: results go through
+            // argsBuffer and the call itself returns a dummy i64.
+            returnType = Type.SINT64;
         } else {
             returnType = valTypeToJffiType(funcType.returns().get(0));
         }
@@ -500,6 +526,10 @@ public final class JffiNativeMachine implements Machine {
         if (funcType.returns().isEmpty()) {
             return;
         }
+        if (funcType.returns().size() > 1) {
+            buf.setLongReturn(result);
+            return;
+        }
         ValType retType = funcType.returns().get(0);
         if (retType.equals(ValType.I32)) {
             buf.setIntReturn((int) result);
@@ -522,11 +552,22 @@ public final class JffiNativeMachine implements Machine {
             if (funcId < numImports) {
                 var importFunc = instance.imports().function(funcId);
                 long[] result = importFunc.handle().apply(instance, args);
-                return (result != null && result.length > 0) ? result[0] : 0L;
+                if (result == null || result.length == 0) {
+                    return 0L;
+                }
+                if (importFunc.functionType().returns().size() > 1) {
+                    // Multi-return convention: the caller reads the results back
+                    // out of argsBuffer and ignores the returned value.
+                    for (int i = 0; i < result.length; i++) {
+                        MEM.putLong(argsBufferAddr + CtxBuffer.argOffset(i), result[i]);
+                    }
+                    return 0L;
+                }
+                return result[0];
             }
             throw new WasmEngineException("Function " + funcId + " not compiled");
         } catch (Throwable t) {
-            pendingException = t;
+            recordHostException(t);
             return 0L;
         }
     }
@@ -554,28 +595,9 @@ public final class JffiNativeMachine implements Machine {
             if (argCount < 0) {
                 return handleTableOperation(argCount);
             }
-
-            // Normal call_indirect path
-            int typeId = MEM.getInt(ctxAddr + CtxBuffer.TYPE_ID);
-            int tableIdx = MEM.getInt(ctxAddr + CtxBuffer.TABLE_IDX);
-            int elemIdx = MEM.getInt(ctxAddr + CtxBuffer.ELEM_IDX);
-
-            int funcId = nativeTables[tableIdx].requiredRef(elemIdx);
-
-            int actualTypeIdx = instance.functionType(funcId);
-            if (actualTypeIdx != typeId) {
-                throw new WasmEngineException("indirect call type mismatch");
-            }
-
-            long[] args = new long[argCount];
-            for (int i = 0; i < argCount; i++) {
-                args[i] = MEM.getLong(argsBufferAddr + CtxBuffer.argOffset(i));
-            }
-
-            long[] result = this.call(funcId, args);
-            return result.length > 0 ? result[0] : 0L;
+            throw new WasmEngineException("Unexpected trampoline call: argCount " + argCount);
         } catch (Throwable t) {
-            pendingException = t;
+            recordHostException(t);
             return 0L;
         }
     }
@@ -754,7 +776,7 @@ public final class JffiNativeMachine implements Machine {
             }
             return oldPages;
         } catch (Throwable t) {
-            pendingException = t;
+            recordHostException(t);
             return -1L;
         }
     }
@@ -800,16 +822,22 @@ public final class JffiNativeMachine implements Machine {
 
         this.nativeTables = new JffiNativeTable[tableCount];
         boolean[] owned = new boolean[tableCount];
+        this.ownsTable = owned;
         this.tablePtrsArrayAddr = MEM.allocateMemory((long) tableCount * 8, true);
 
         for (int i = 0; i < tableCount; i++) {
             var table = instance.table(i);
             if (table instanceof JffiNativeTable) {
-                nativeTables[i] = (JffiNativeTable) table;
+                var nt = (JffiNativeTable) table;
+                nt.resolvePendingRefs(instance);
+                nativeTables[i] = nt;
+                // A table this module defines came from our factory and dies with
+                // the instance. An imported one belongs to whoever created it.
+                owned[i] = i >= importedTableCount;
             } else {
                 // Imported table not created by our factory — wrap it
                 var tableDef = new run.endive.wasm.types.Table(table.elementType(), table.limits());
-                var nt = new JffiNativeTable(tableDef);
+                var nt = new JffiNativeTable(tableDef, run.endive.wasm.types.Value.REF_NULL_VALUE);
                 for (int j = 0; j < table.size(); j++) {
                     nt.setRef(j, table.ref(j), instance);
                 }
@@ -832,45 +860,57 @@ public final class JffiNativeMachine implements Machine {
         return funcTypesArrayAddr;
     }
 
+    /**
+     * Marks the context so compiled code unwinds at its next trap check rather
+     * than running on. The first throwable wins: it is the one that stopped
+     * execution, so a later one would be a symptom of it.
+     */
+    private void recordHostException(Throwable t) {
+        if (pendingException == null) {
+            pendingException = t;
+        }
+        MEM.putInt(ctxBufferAddr + CtxBuffer.TRAP_CODE, CtxBuffer.TRAP_HOST_EXCEPTION);
+    }
+
     private static WasmEngineException trapException(int trapCode) {
         if (trapCode == CtxBuffer.TRAP_DIV_BY_ZERO) {
-            return new WasmEngineException("integer divide by zero");
+            return new TrapException("integer divide by zero");
         }
         if (trapCode == CtxBuffer.TRAP_INT_OVERFLOW) {
-            return new WasmEngineException("integer overflow");
+            return new TrapException("integer overflow");
         }
         if (trapCode == CtxBuffer.TRAP_UNREACHABLE) {
-            return new WasmEngineException("unreachable");
+            return new TrapException("unreachable");
         }
         if (trapCode == CtxBuffer.TRAP_TRUNC_OVERFLOW) {
-            return new WasmEngineException("integer overflow");
+            return new TrapException("integer overflow");
         }
         if (trapCode == CtxBuffer.TRAP_TRUNC_NAN) {
-            return new WasmEngineException("invalid conversion to integer");
+            return new TrapException("invalid conversion to integer");
         }
         if (trapCode == CtxBuffer.TRAP_OOB) {
-            return new WasmEngineException("out of bounds memory access");
+            return new WasmRuntimeException("out of bounds memory access");
         }
         if (trapCode == CtxBuffer.TRAP_CALL_STACK_EXHAUSTED) {
-            return new WasmEngineException("call stack exhausted");
+            return new TrapException("call stack exhausted");
         }
         if (trapCode == CtxBuffer.TRAP_TABLE_OOB) {
-            return new WasmEngineException("out of bounds table access");
+            return new TrapException("out of bounds table access");
         }
         if (trapCode == CtxBuffer.TRAP_UNDEFINED_ELEMENT) {
-            return new WasmEngineException("undefined element");
+            return new TrapException("undefined element");
         }
         if (trapCode == CtxBuffer.TRAP_UNINITIALIZED_ELEMENT) {
-            return new WasmEngineException("uninitialized element");
+            return new TrapException("uninitialized element");
         }
         if (trapCode == CtxBuffer.TRAP_INDIRECT_CALL_TYPE_MISMATCH) {
-            return new WasmEngineException("indirect call type mismatch");
+            return new TrapException("indirect call type mismatch");
         }
         if (trapCode == CtxBuffer.TRAP_UNALIGNED_ATOMIC) {
-            return new WasmEngineException("unaligned atomic");
+            return new TrapException("unaligned atomic");
         }
         if (trapCode == CtxBuffer.TRAP_INTERRUPTED) {
-            return new WasmEngineException("interrupted");
+            return new TrapException("interrupted");
         }
         return new WasmEngineException("trap: unknown code " + trapCode);
     }
@@ -985,11 +1025,17 @@ public final class JffiNativeMachine implements Machine {
         var trampolineCallCtx = entryTrampolineCallCtxs[funcId];
 
         try {
+            boolean outermostCall = callDepth++ == 0;
             initializeImportGlobals();
             initializeNativeTables();
 
-            // Reset stack limit so native code re-initializes from calling thread's RSP
-            MEM.putLong(ctxBufferAddr + CtxBuffer.STACK_LIMIT, 0L);
+            // Re-anchor the stack guard only for a call that starts on this
+            // stack. A host function calling back in has to keep measuring
+            // against where the outer call began, or every level moves the
+            // limit deeper and the guard stops firing.
+            if (outermostCall) {
+                MEM.putLong(ctxBufferAddr + CtxBuffer.STACK_LIMIT, 0L);
+            }
 
             if (!memBaseInitialized) {
                 var mem = instance.memory();
@@ -1014,17 +1060,19 @@ public final class JffiNativeMachine implements Machine {
             }
 
             if (Thread.interrupted()) {
-                throw new WasmEngineException("interrupted");
+                throw new TrapException("interrupted");
             }
 
             Thread caller = Thread.currentThread();
             Thread watchdog =
                     new Thread(
                             () -> {
+                                // Keeps raising rather than returning after the
+                                // first: a nested call clears the flag when it
+                                // finishes, and the outer call still needs it.
                                 while (!Thread.currentThread().isInterrupted()) {
                                     if (caller.isInterrupted()) {
                                         requestInterrupt();
-                                        return;
                                     }
                                     try {
                                         Thread.sleep(1);
@@ -1048,6 +1096,9 @@ public final class JffiNativeMachine implements Machine {
                                 args);
             } finally {
                 watchdog.interrupt();
+                // The flag only ever means "stop this call". Left set it would
+                // trap the next one on a thread nobody interrupted.
+                clearInterrupt();
             }
 
             // Check for exceptions from upcall stubs first — a host function
@@ -1093,6 +1144,7 @@ public final class JffiNativeMachine implements Machine {
             sneakyThrow(e);
             throw new AssertionError("unreachable");
         } finally {
+            callDepth--;
             // Prevent the JIT from considering this machine unreachable during
             // the native call, which would let GC collect and close() free
             // native memory while code is executing.
