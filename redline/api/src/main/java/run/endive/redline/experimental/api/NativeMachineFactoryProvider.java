@@ -3,12 +3,15 @@ package run.endive.redline.experimental.api;
 import java.util.Optional;
 import java.util.ServiceConfigurationError;
 import java.util.ServiceLoader;
+import run.endive.runtime.GlobalInstance;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Memory;
 import run.endive.runtime.TableInstance;
 import run.endive.wasm.WasmModule;
 import run.endive.wasm.types.MemoryLimits;
+import run.endive.wasm.types.MutabilityType;
 import run.endive.wasm.types.Table;
+import run.endive.wasm.types.Value;
 
 public interface NativeMachineFactoryProvider {
 
@@ -17,6 +20,8 @@ public interface NativeMachineFactoryProvider {
     Memory createMemory(MemoryLimits limits);
 
     TableInstance createImportTable(Table table, int initValue);
+
+    GlobalInstance createImportGlobal(Value value, MutabilityType mutability);
 
     int priority();
 

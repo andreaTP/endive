@@ -1,5 +1,6 @@
 package run.endive.redline.experimental.runner.internal;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import run.endive.runtime.GlobalInstance;
@@ -13,8 +14,18 @@ import run.endive.wasm.types.Value;
  */
 public final class NativeGlobalInstance extends GlobalInstance {
 
-    private final MemorySegment buffer;
-    private final long offset;
+    // Not final: an imported global is built before the instance that will use it
+    // exists, so it starts out on its own buffer and is moved onto the machine's
+    // globals buffer by rebind() once there is one. See NativeMachine.
+    private MemorySegment buffer;
+    private long offset;
+
+    /**
+     * True while this global sits on a buffer of its own rather than inside some
+     * machine's globals buffer. Only such a global may be moved: one a module
+     * exports is already where that module's compiled code reads it.
+     */
+    private boolean standalone;
 
     public NativeGlobalInstance(
             MemorySegment buffer,
@@ -27,6 +38,36 @@ public final class NativeGlobalInstance extends GlobalInstance {
         this.offset = (long) index * 8;
         // Write initial value to buffer
         buffer.set(ValueLayout.JAVA_LONG, offset, initialValue);
+    }
+
+    /**
+     * A global for the host to pass in as an import, on storage of its own until the
+     * instance that receives it adopts it.
+     */
+    public static NativeGlobalInstance standalone(
+            long initialValue, ValType valType, MutabilityType mutabilityType) {
+        var global =
+                new NativeGlobalInstance(
+                        Arena.ofAuto().allocate(8, 8), 0, initialValue, valType, mutabilityType);
+        global.standalone = true;
+        return global;
+    }
+
+    boolean isStandalone() {
+        return standalone;
+    }
+
+    /**
+     * Moves this global onto the buffer compiled code reads, carrying its current
+     * value across. Both sides then share the same eight bytes, so neither can go
+     * stale while the other writes.
+     */
+    void rebind(MemorySegment target, int index) {
+        long current = getValue();
+        this.buffer = target;
+        this.offset = (long) index * 8;
+        this.standalone = false;
+        target.set(ValueLayout.JAVA_LONG, offset, current);
     }
 
     @Override

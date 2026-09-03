@@ -783,6 +783,20 @@ public final class JffiNativeMachine implements Machine {
 
     // --- Globals initialization ---
 
+    /**
+     * Compiled code reaches an import through a raw address, so it can only use one
+     * this backend built. The message points at the module's own factory rather than
+     * a backend-specific one, because that is what works on every platform.
+     */
+    private static String foreignImportMessage(String kind, Object actual) {
+        return "this module is running natively compiled code, which can only use an imported "
+                + kind
+                + " created by the same backend, but got "
+                + actual.getClass().getName()
+                + ". Create it through the generated module's imports() factory, which picks"
+                + " the right one whether or not native code is available on this platform.";
+    }
+
     private void initializeImportGlobals() {
         if (importGlobalsInitialized || globalCount == 0) {
             return;
@@ -800,7 +814,21 @@ public final class JffiNativeMachine implements Machine {
                                 .count();
 
         for (int i = 0; i < importGlobalCount; i++) {
-            MEM.putLong(globalsBufferAddr + (long) i * 8, instance.global(i).getValue());
+            var global = instance.global(i);
+            if (!(global instanceof JffiNativeGlobalInstance)) {
+                throw new WasmEngineException(foreignImportMessage("global", global));
+            }
+            var nativeGlobal = (JffiNativeGlobalInstance) global;
+            if (nativeGlobal.isStandalone()) {
+                // Passed in by the host: adopt it, so what this module writes stays
+                // visible through the caller's own object.
+                nativeGlobal.rebind(globalsBufferAddr, i);
+            } else {
+                // Exported by another module, and already sitting where that
+                // module's compiled code reads it. Its storage cannot move, so this
+                // module starts from its current value.
+                MEM.putLong(globalsBufferAddr + (long) i * 8, nativeGlobal.getValue());
+            }
         }
     }
 
@@ -835,14 +863,7 @@ public final class JffiNativeMachine implements Machine {
                 // the instance. An imported one belongs to whoever created it.
                 owned[i] = i >= importedTableCount;
             } else {
-                // Imported table not created by our factory — wrap it
-                var tableDef = new run.endive.wasm.types.Table(table.elementType(), table.limits());
-                var nt = new JffiNativeTable(tableDef, run.endive.wasm.types.Value.REF_NULL_VALUE);
-                for (int j = 0; j < table.size(); j++) {
-                    nt.setRef(j, table.ref(j), instance);
-                }
-                nativeTables[i] = nt;
-                owned[i] = true;
+                throw new WasmEngineException(foreignImportMessage("table", table));
             }
 
             MEM.putLong(tablePtrsArrayAddr + (long) i * 8, nativeTables[i].nativeBufferAddress());
@@ -1043,11 +1064,7 @@ public final class JffiNativeMachine implements Machine {
                     cachedMemBase = ((JffiNativeMemory) mem).nativeAddress();
                     MEM.putLong(ctxBufferAddr + CtxBuffer.MEM_BASE_ADDR, cachedMemBase);
                 } else if (mem != null) {
-                    throw new WasmEngineException(
-                            "JffiNativeMachine requires JffiNativeMemory but got "
-                                    + mem.getClass().getName()
-                                    + ". Use JffiNativeMachineFactory.createMemory() for all"
-                                    + " memories, including imports.");
+                    throw new WasmEngineException(foreignImportMessage("memory", mem));
                 } else {
                     cachedMemBase = 0L;
                 }

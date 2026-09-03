@@ -57,6 +57,17 @@
               <redlineExperimental>true</redlineExperimental>
             </configuration>
           </execution>
+          <execution>
+            <id>compile-imports</id>
+            <goals>
+              <goal>compile</goal>
+            </goals>
+            <configuration>
+              <name>endive.test.ImportsModule</name>
+              <wasmFile>src/test/resources/imports.wat.wasm</wasmFile>
+              <redlineExperimental>true</redlineExperimental>
+            </configuration>
+          </execution>
         </executions>
       </plugin>
     </plugins>

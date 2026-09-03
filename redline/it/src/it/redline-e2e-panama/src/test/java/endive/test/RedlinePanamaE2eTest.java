@@ -2,6 +2,7 @@ package endive.test;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -9,6 +10,16 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import org.junit.jupiter.api.Test;
 import run.endive.redline.experimental.api.NativeMachineFactoryProvider;
 import run.endive.redline.experimental.api.internal.RedlineTarget;
+import run.endive.runtime.ImportGlobal;
+import run.endive.runtime.ImportMemory;
+import run.endive.runtime.ImportTable;
+import run.endive.runtime.ImportValues;
+import run.endive.wasm.types.MemoryLimits;
+import run.endive.wasm.types.MutabilityType;
+import run.endive.wasm.types.Table;
+import run.endive.wasm.types.TableLimits;
+import run.endive.wasm.types.ValType;
+import run.endive.wasm.types.Value;
 
 class RedlinePanamaE2eTest {
 
@@ -47,6 +58,59 @@ class RedlinePanamaE2eTest {
                     (int) add.apply(0, -1)[0],
                     "i32 add(0, -1) should be -1 when narrowed to int");
         }
+    }
+
+    /**
+     * The whole point of the factory: build the imports, hand them to the module, and
+     * read back through the very same objects what the module wrote to them. This is
+     * the shape the documentation shows, and it has to hold whether this platform got
+     * native code or fell back to the build-time compiled bytecode.
+     */
+    @Test
+    public void theModuleSharesTheImportsItWasGiven() {
+        var imports = ImportsModule.imports();
+
+        var memory = imports.memory(new MemoryLimits(1, 1));
+        var table =
+                imports.table(
+                        new Table(ValType.FuncRef, new TableLimits(2, 2)), Value.REF_NULL_VALUE);
+        var counter = imports.global(Value.i32(10), MutabilityType.Var);
+
+        var importValues =
+                ImportValues.builder()
+                        .addMemory(new ImportMemory("env", "memory", memory))
+                        .addTable(new ImportTable("env", "table", table))
+                        .addGlobal(new ImportGlobal("env", "counter", counter))
+                        .build();
+
+        try (var instance = ImportsModule.builder().withImportValues(importValues).build()) {
+            instance.export("run").apply();
+
+            assertEquals(11, counter.getValue(), "the caller's global must carry the increment");
+            assertEquals(23130, memory.readInt(0), "the caller's memory must carry the write");
+            assertNotEquals(
+                    Value.REF_NULL_VALUE,
+                    table.ref(0),
+                    "the caller's table must carry the stored funcref");
+
+            // and the other direction: what the caller writes, the module reads
+            memory.writeI32(16, 21);
+            instance.export("doubleAt").apply(16);
+            assertEquals(
+                    42, memory.readInt(20), "the module must read what the caller wrote to memory");
+        }
+    }
+
+    /**
+     * imports() must agree with builder() about which backend is in play. Getting this
+     * wrong is silent: the module still runs, and only the caller's view goes stale.
+     */
+    @Test
+    public void importsFactoryMatchesTheBackendInUse() {
+        assertEquals(
+                AddModule.nativeProvider().isPresent(),
+                AddModule.imports().isNative(),
+                "imports() must build for the same backend builder() runs on");
     }
 
     @Test
