@@ -72,6 +72,16 @@ public class EndiveCompilerGenMojo extends AbstractMojo {
     Set<Integer> interpretedFunctions;
 
     /**
+     * Fully qualified name of a MethodPrefixer implementation used to name the compiled methods.
+     * Defaults to naming them func_0, func_1 and so on. Set it to
+     * run.endive.compiler.NameSectionMethodPrefixer to name them after the module's name section,
+     * which makes thread dumps and profiler output readable, or to your own implementation. A
+     * custom class must be a dependency of this plugin, not of the project.
+     */
+    @Parameter(required = false)
+    String methodPrefixer;
+
+    /**
      * Fully qualified name of the user's class that will use the compiled module.
      * When set, the plugin generates _ModuleExports and _ModuleImports wrapper classes,
      * eliminating the need for @WasmModuleInterface annotation and the annotation processor.
@@ -112,6 +122,7 @@ public class EndiveCompilerGenMojo extends AbstractMojo {
                         .withTargetWasmFolder(targetWasmFolder.toPath())
                         .withInterpreterFallback(interpreterFallback)
                         .withInterpretedFunctions(interpretedFunctions)
+                        .withMethodPrefixer(methodPrefixer)
                         .withModuleInterface(moduleInterface);
         if (redlineTargetsExperimental != null && !redlineTargetsExperimental.isEmpty()) {
             configBuilder.withRedlineTargets(redlineTargetsExperimental);
