@@ -35,6 +35,7 @@ import java.util.Set;
 import java.util.function.Function;
 import run.endive.codegen.CodegenUtils;
 import run.endive.codegen.ModuleInterfaceCodegen;
+import run.endive.compiler.MethodPrefixer;
 import run.endive.compiler.internal.ByteClassCollector;
 import run.endive.compiler.internal.Compiler;
 import run.endive.runtime.CompiledModule;
@@ -66,6 +67,7 @@ public class Generator {
                         .withClassCollectorFactory(ByteClassCollector::new)
                         .withInterpreterFallback(config.interpreterFallback())
                         .withInterpretedFunctions(config.interpretedFunctions())
+                        .withMethodPrefixer(loadMethodPrefixer(config.methodPrefixer()))
                         .build();
         var result = compiler.compile();
 
@@ -80,6 +82,31 @@ public class Generator {
         }
 
         return result.interpretedFunctions();
+    }
+
+    /**
+     * Instantiates the named {@link MethodPrefixer}, or returns {@code null} when {@code className}
+     * is not set. The class must be on the classloader of the build tool driving the generator.
+     */
+    private static MethodPrefixer loadMethodPrefixer(String className) {
+        if (className == null || className.isEmpty()) {
+            return null;
+        }
+        try {
+            return Class.forName(className)
+                    .asSubclass(MethodPrefixer.class)
+                    .getDeclaredConstructor()
+                    .newInstance();
+        } catch (ReflectiveOperationException | ClassCastException e) {
+            throw new IllegalArgumentException(
+                    "Cannot instantiate the configured MethodPrefixer: "
+                            + className
+                            + ". It must implement "
+                            + MethodPrefixer.class.getName()
+                            + ", have a public no-argument constructor, and be on the build tool's"
+                            + " classpath.",
+                    e);
+        }
     }
 
     public void generateSources() throws IOException {

@@ -37,6 +37,55 @@ WASM function size exceeds the Java method size limits and cannot be compiled to
 
 If this happens you can configure your build tool, to just issue warning messages, or to be silent.  Another way to silence the message is to configure the build tool with an explicit list of functions that should be interpreted. Typically, you obtain the list of the functions by running the compiler once with `interpreterFallback` set to `WARN`
 
+### Method Names
+
+By default the compiler names each generated method `func_0`, `func_1`, etc. The `methodPrefixer`
+parameter takes the fully qualified name of a `MethodPrefixer` implementation that supplies a more
+recognisable prefix instead, which makes thread dumps, profiler output and stack traces identify
+functions by name. `NameSectionMethodPrefixer` uses the function names from the module's name
+section:
+
+```xml
+<configuration>
+  <wasmFile>src/main/resources/add.wasm</wasmFile>
+  <name>org.acme.wasm.Add</name>
+  <methodPrefixer>run.endive.compiler.NameSectionMethodPrefixer</methodPrefixer>
+</configuration>
+```
+
+You can name your own implementation instead, for example one that demangles Rust or C++ symbols.
+It must implement `run.endive.compiler.MethodPrefixer` and have a public no-argument constructor.
+The class is loaded by the plugin, so it has to be a dependency of the plugin declaration rather
+than of the project:
+
+```xml
+<plugin>
+  <groupId>run.endive</groupId>
+  <artifactId>endive-compiler-maven-plugin</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>org.acme</groupId>
+      <artifactId>my-demangler</artifactId>
+      <version>1.0.0</version>
+    </dependency>
+  </dependencies>
+  <!-- executions, with <methodPrefixer>org.acme.MyDemanglingPrefixer</methodPrefixer> -->
+</plugin>
+```
+
+Names are resolved once, at build time. This is the only opportunity to do so: the meta Wasm module
+emitted next to the compiled classes has all of its custom sections stripped, so the name section is
+no longer available when the module is loaded. Resolving names here also costs nothing at runtime.
+
+Whatever the prefixer returns, the compiler appends `_<funcId>` to produce the method name, so names
+stay unique and the Wasm function index remains recoverable from any method name. Characters that are
+illegal in JVM method names (`. ; [ / < >`) are replaced with underscores. The prefix is a hint for
+humans; tools should use the function index instead. See
+[Method Names](runtime-compiler.md#method-names) for the full contract.
+
+Since the name section is not retained, mapping a function index back to its original name requires
+the original Wasm module, which is a build input rather than something shipped with the classes.
+
 ## Using Maven
 
 Example configuration of the Maven plug-in:
@@ -187,6 +236,14 @@ endive:compile
       Required: true
       the action to take if the compiler needs to use the interpreter because a
       function is too big
+
+    methodPrefixer
+      Fully qualified name of a MethodPrefixer implementation used to name the
+      compiled methods. Defaults to naming them func_0, func_1 and so on. Set
+      it to run.endive.compiler.NameSectionMethodPrefixer to name them after
+      the module's name section, which makes thread dumps and profiler output
+      readable, or to your own implementation. A custom class must be a
+      dependency of this plugin, not of the project.
 
     moduleInterface
       Fully qualified name of the user's class for which to generate
