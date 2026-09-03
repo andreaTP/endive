@@ -43,6 +43,11 @@ public final class Config {
     private final Set<Integer> interpretedFunctions;
 
     /**
+     * the fully qualified name of the MethodPrefixer implementation used to name compiled methods
+     */
+    private final String methodPrefixer;
+
+    /**
      * the fully qualified name of the user's class for which to generate module interface wrappers
      */
     private final String moduleInterface;
@@ -60,6 +65,7 @@ public final class Config {
             Path targetWasmFolder,
             InterpreterFallback interpreterFallback,
             Set<Integer> interpretedFunctions,
+            String methodPrefixer,
             String moduleInterface,
             List<String> redlineTargets) {
         this.wasmFile = wasmFile;
@@ -69,6 +75,7 @@ public final class Config {
         this.targetWasmFolder = targetWasmFolder;
         this.interpreterFallback = interpreterFallback;
         this.interpretedFunctions = interpretedFunctions;
+        this.methodPrefixer = methodPrefixer;
         this.moduleInterface = moduleInterface;
         this.redlineTargets = redlineTargets;
     }
@@ -99,6 +106,10 @@ public final class Config {
 
     public Set<Integer> interpretedFunctions() {
         return interpretedFunctions;
+    }
+
+    public String methodPrefixer() {
+        return methodPrefixer;
     }
 
     public String moduleInterface() {
@@ -141,6 +152,7 @@ public final class Config {
         private Path targetWasmFolder;
         private InterpreterFallback interpreterFallback = InterpreterFallback.FAIL;
         private Set<Integer> interpretedFunctions;
+        private String methodPrefixer;
         private String moduleInterface;
         private List<String> redlineTargets = List.of();
 
@@ -181,6 +193,11 @@ public final class Config {
             return this;
         }
 
+        public Builder withMethodPrefixer(String methodPrefixer) {
+            this.methodPrefixer = methodPrefixer;
+            return this;
+        }
+
         public Builder withModuleInterface(String moduleInterface) {
             this.moduleInterface = moduleInterface;
             return this;
@@ -200,6 +217,7 @@ public final class Config {
                     targetWasmFolder,
                     interpreterFallback,
                     interpretedFunctions,
+                    methodPrefixer,
                     moduleInterface,
                     redlineTargets);
         }

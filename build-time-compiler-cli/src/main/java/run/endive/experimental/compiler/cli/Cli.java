@@ -73,6 +73,15 @@ public class Cli implements Runnable {
 
     @CommandLine.Option(
             order = 7,
+            names = "--method-prefixer",
+            description =
+                    "Fully qualified name of a MethodPrefixer implementation used to name compiled"
+                            + " methods, for example"
+                            + " run.endive.compiler.NameSectionMethodPrefixer")
+    String methodPrefixer;
+
+    @CommandLine.Option(
+            order = 8,
             names = "--module-interface",
             description =
                     "Fully qualified class name for which to generate _ModuleExports and"
@@ -90,6 +99,7 @@ public class Cli implements Runnable {
                         .withTargetWasmFolder(targetWasmFolder)
                         .withInterpreterFallback(interpreterFallback)
                         .withInterpretedFunctions(interpretedFunctions)
+                        .withMethodPrefixer(methodPrefixer)
                         .withModuleInterface(moduleInterface)
                         .build();
 

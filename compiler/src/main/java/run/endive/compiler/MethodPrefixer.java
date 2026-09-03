@@ -52,9 +52,6 @@ public interface MethodPrefixer {
      * back to {@link #DEFAULT_PREFIX} for functions without one.
      */
     static MethodPrefixer fromNameSection() {
-        return (funcId, module) -> {
-            var nameSection = module.nameSection();
-            return nameSection == null ? null : nameSection.nameOfFunction(funcId);
-        };
+        return new NameSectionMethodPrefixer();
     }
 }
