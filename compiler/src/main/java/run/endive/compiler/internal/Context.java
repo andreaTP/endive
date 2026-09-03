@@ -33,6 +33,7 @@ final class Context {
     private final int tempSlot;
     private final int trySaveBaseSlot;
     private final IntFunction<String> callIndirectClassResolver;
+    private final IntFunction<String> methodNames;
 
     public Context(
             WasmModule module,
@@ -46,7 +47,8 @@ final class Context {
             boolean[] tailCallFunctions,
             boolean[] tailCallTypes,
             IntFunction<String> callIndirectClassResolver,
-            int maxTempSlots) {
+            int maxTempSlots,
+            IntFunction<String> methodNames) {
         this.module = module;
         this.internalClassName = internalClassName;
         this.maxFunctionsPerClass = maxFunctionsPerClass;
@@ -58,6 +60,7 @@ final class Context {
         this.tailCallFunctions = tailCallFunctions;
         this.tailCallTypes = tailCallTypes;
         this.callIndirectClassResolver = callIndirectClassResolver;
+        this.methodNames = methodNames;
 
         // compute JVM slot indices for WASM locals
         List<Integer> slots = new ArrayList<>(type.params().size() + body.localTypes().size());
@@ -120,6 +123,10 @@ final class Context {
 
     public TypeSection typeSection() {
         return module.typeSection();
+    }
+
+    public String methodNameForFunc(int funcId) {
+        return methodNames.apply(funcId);
     }
 
     public int getId() {

@@ -18,6 +18,7 @@ import java.util.Locale;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import run.endive.compiler.MethodPrefixer;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Memory;
 import run.endive.wasm.WasmModule;
@@ -282,11 +283,14 @@ final class CompilerUtil {
     }
 
     public static void emitInvokeFunction(
-            MethodVisitor asm, String internalClassName, int funcId, FunctionType functionType) {
+            MethodVisitor asm,
+            String internalClassName,
+            String methodName,
+            FunctionType functionType) {
         asm.visitMethodInsn(
                 Opcodes.INVOKESTATIC,
                 internalClassName,
-                methodNameForFunc(funcId),
+                methodName,
                 methodTypeFor(functionType).toMethodDescriptorString(),
                 false);
     }
@@ -298,8 +302,51 @@ final class CompilerUtil {
                         .collect(joining("_"));
     }
 
-    public static String methodNameForFunc(int funcId) {
-        return "func_" + funcId;
+    /**
+     * Builds the JVM method name for a WASM function as {@code <sanitized prefix>_<funcId>}. The
+     * prefixer only supplies the prefix, so the {@code _<funcId>} suffix always makes the name
+     * unique and keeps the function id recoverable via {@link #extractFuncId(String)}.
+     */
+    public static String methodNameForFunc(int funcId, MethodPrefixer prefixer, WasmModule module) {
+        String prefix = prefixer == null ? null : prefixer.getMethodPrefix(funcId, module);
+        if (prefix != null) {
+            prefix = sanitizeWasmName(prefix);
+        }
+        if (prefix == null || prefix.isEmpty()) {
+            prefix = MethodPrefixer.DEFAULT_PREFIX;
+        }
+        return prefix + "_" + funcId;
+    }
+
+    static String sanitizeWasmName(String name) {
+        StringBuilder sb = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            // see https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html#jvms-4.2.2 for
+            // reference
+            if (c == '.' || c == ';' || c == '[' || c == '/' || c == '<' || c == '>') {
+                sb.append('_');
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Returns the WASM function id parsed from the {@code _<funcId>} suffix of a compiled method
+     * name, or {@code -1} when the name does not end in one.
+     */
+    static int extractFuncId(String methodName) {
+        int lastUnderscore = methodName.lastIndexOf('_');
+        if (lastUnderscore < 0) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(methodName.substring(lastUnderscore + 1));
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     static String callMethodName(int funcId) {
