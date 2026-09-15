@@ -1875,7 +1875,8 @@ public class InterpreterMachine implements Machine {
         var heapType = (int) operands.get(0);
         if (heapType == ValType.TypeIdxCode.FUNC.code()
                 || heapType == ValType.TypeIdxCode.NOFUNC.code()
-                || heapType == ValType.TypeIdxCode.EXN.code()) {
+                || heapType == ValType.TypeIdxCode.EXN.code()
+                || heapType == ValType.TypeIdxCode.NOEXN.code()) {
             stack.push(REF_NULL_VALUE);
         } else {
             // GC refs, externref, noexternref all use Object null
@@ -3984,7 +3985,8 @@ public class InterpreterMachine implements Machine {
                 && sourceHeapType != ValType.TypeIdxCode.NOFUNC.code()
                 && sourceHeapType != ValType.TypeIdxCode.EXTERN.code()
                 && sourceHeapType != ValType.TypeIdxCode.NOEXTERN.code()
-                && sourceHeapType != ValType.TypeIdxCode.EXN.code();
+                && sourceHeapType != ValType.TypeIdxCode.EXN.code()
+                && sourceHeapType != ValType.TypeIdxCode.NOEXN.code();
     }
 
     private static void REF_TEST(

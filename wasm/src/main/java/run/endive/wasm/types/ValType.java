@@ -33,6 +33,7 @@ public final class ValType {
     public static final ValType NoneRef = new ValType(ID.NoneRef);
     public static final ValType NoFuncRef = new ValType(ID.NoFuncRef);
     public static final ValType NoExternRef = new ValType(ID.NoExternRef);
+    public static final ValType NoExnRef = new ValType(ID.NoExnRef);
 
     public static final ValType RefBot =
             new ValType(ValType.ID.Ref, ValType.TypeIdxCode.BOT.code());
@@ -101,6 +102,9 @@ public final class ValType {
         } else if (opcode == ID.NoFuncRef) {
             typeIdx = TypeIdxCode.NOFUNC.code();
             opcode = ID.RefNull;
+        } else if (opcode == ID.NoExnRef) {
+            typeIdx = TypeIdxCode.NOEXN.code();
+            opcode = ID.RefNull;
         } else if ((opcode == ID.RefNull || opcode == ID.Ref) && typeIdx >= 0) {
             assert resolvedFunctionTypeId >= 0;
         }
@@ -146,7 +150,8 @@ public final class ValType {
                         || ht == TypeIdxCode.NOFUNC.code()
                         || ht == TypeIdxCode.EXTERN.code()
                         || ht == TypeIdxCode.NOEXTERN.code()
-                        || ht == TypeIdxCode.EXN.code()) {
+                        || ht == TypeIdxCode.EXN.code()
+                        || ht == TypeIdxCode.NOEXN.code()) {
                     return false;
                 }
                 if (ht >= 0 && ts != null) {
@@ -272,6 +277,7 @@ public final class ValType {
             case ID.NoneRef:
             case ID.NoExternRef:
             case ID.NoFuncRef:
+            case ID.NoExnRef:
                 return true;
             default:
                 return false;
@@ -311,6 +317,7 @@ public final class ValType {
     public static boolean isAbsHeapType(int opcode) {
         return (opcode == ID.NoFuncRef
                 || opcode == ID.NoExternRef
+                || opcode == ID.NoExnRef
                 || opcode == ID.NoneRef
                 || opcode == ID.FuncRef
                 || opcode == ID.ExternRef
@@ -339,6 +346,7 @@ public final class ValType {
             case ID.NoneRef:
             case ID.NoExternRef:
             case ID.NoFuncRef:
+            case ID.NoExnRef:
             case ID.V128:
             case ID.I32:
             case ID.I64:
@@ -398,6 +406,10 @@ public final class ValType {
         // noextern <: extern
         if (ht1 == TypeIdxCode.NOEXTERN.code()) {
             return ht2 == TypeIdxCode.EXTERN.code();
+        }
+        // noexn <: exn
+        if (ht1 == TypeIdxCode.NOEXN.code()) {
+            return ht2 == TypeIdxCode.EXN.code();
         }
 
         // i31 <: eq <: any
@@ -608,6 +620,7 @@ public final class ValType {
 
     public enum TypeIdxCode {
         // heap type
+        NOEXN(-12), // 0x74
         NOFUNC(-13), // 0x73
         NOEXTERN(-14), // 0x72
         NONE(-15), // 0x71
@@ -654,6 +667,7 @@ public final class ValType {
         public static final int NoneRef = 0x71;
         public static final int NoExternRef = 0x72;
         public static final int NoFuncRef = 0x73;
+        public static final int NoExnRef = 0x74;
         public static final int V128 = 0x7B;
         public static final int F64 = 0x7C;
         public static final int F32 = 0x7D;
@@ -698,6 +712,7 @@ public final class ValType {
                     || opcode == ArrayRef
                     || opcode == NoneRef
                     || opcode == NoExternRef
+                    || opcode == NoExnRef
                     || opcode == NoFuncRef
                     || opcode == V128
                     || opcode == F64
@@ -767,7 +782,8 @@ public final class ValType {
                             || typeIdx == TypeIdxCode.NOFUNC.code()
                             || typeIdx == TypeIdxCode.EXTERN.code()
                             || typeIdx == TypeIdxCode.NOEXTERN.code()
-                            || typeIdx == TypeIdxCode.EXN.code()) {
+                            || typeIdx == TypeIdxCode.EXN.code()
+                            || typeIdx == TypeIdxCode.NOEXN.code()) {
                         return false;
                     }
                     if (typeIdx >= 0 && ts != null) {

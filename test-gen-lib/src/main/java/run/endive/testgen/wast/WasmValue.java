@@ -36,6 +36,7 @@ public class WasmValue {
                 return "Double.longBitsToDouble(" + result + "), 0.0";
             case EXTERN_REF:
             case EXN_REF:
+            case NULL_EXN_REF:
             case FUNC_REF:
             case STRUCT_REF:
             case ANY_REF:
@@ -155,6 +156,8 @@ public class WasmValue {
                 case NULL_REF:
                 case NULL_FUNC_REF:
                 case NULL_EXTERN_REF:
+                case NULL_EXN_REF:
+                case EXN_REF:
                     return new NameExpr(
                             "assertEquals(" + resultVar + ", " + "REF_NULL_VALUE" + ")");
                 case STRUCT_REF:
@@ -208,6 +211,7 @@ public class WasmValue {
                 }
             case EXTERN_REF:
             case EXN_REF:
+            case NULL_EXN_REF:
             case STRUCT_REF:
             case ANY_REF:
             case NULL_REF:
@@ -337,6 +341,7 @@ public class WasmValue {
                 return new NameExpr("assertNotNull(" + resultVar + ")");
             case EXTERN_REF:
             case EXN_REF:
+            case NULL_EXN_REF:
             case FUNC_REF:
             case NULL_FUNC_REF:
             case NULL_EXTERN_REF:
@@ -383,6 +388,7 @@ public class WasmValue {
                 }
             case EXTERN_REF:
             case EXN_REF:
+            case NULL_EXN_REF:
             case STRUCT_REF:
             case ANY_REF:
             case NULL_REF:
@@ -506,6 +512,7 @@ public class WasmValue {
                 return "Double.longBitsToDouble(" + crVar + ".longResult(" + index + ")), 0.0";
             case EXTERN_REF:
             case EXN_REF:
+            case NULL_EXN_REF:
             case FUNC_REF:
             case NULL_FUNC_REF:
             case NULL_EXTERN_REF:

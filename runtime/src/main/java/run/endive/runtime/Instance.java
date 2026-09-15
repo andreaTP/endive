@@ -495,7 +495,8 @@ public class Instance implements AutoCloseable {
         // Bottom types never match non-null values
         if (targetHeapType == ValType.TypeIdxCode.NONE.code()
                 || targetHeapType == ValType.TypeIdxCode.NOFUNC.code()
-                || targetHeapType == ValType.TypeIdxCode.NOEXTERN.code()) {
+                || targetHeapType == ValType.TypeIdxCode.NOEXTERN.code()
+                || targetHeapType == ValType.TypeIdxCode.NOEXN.code()) {
             return false;
         }
         // For abstract func/extern targets: the validator guarantees the operand
@@ -529,7 +530,8 @@ public class Instance implements AutoCloseable {
         }
         if (targetHeapType == ValType.TypeIdxCode.NONE.code()
                 || targetHeapType == ValType.TypeIdxCode.NOFUNC.code()
-                || targetHeapType == ValType.TypeIdxCode.NOEXTERN.code()) {
+                || targetHeapType == ValType.TypeIdxCode.NOEXTERN.code()
+                || targetHeapType == ValType.TypeIdxCode.NOEXN.code()) {
             return false;
         }
         if (targetHeapType == ValType.TypeIdxCode.FUNC.code()
