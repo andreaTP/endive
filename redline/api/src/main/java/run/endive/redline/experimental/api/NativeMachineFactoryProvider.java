@@ -28,19 +28,22 @@ public interface NativeMachineFactoryProvider {
     static Optional<NativeMachineFactoryProvider> discover() {
         NativeMachineFactoryProvider best = null;
         var it = ServiceLoader.load(NativeMachineFactoryProvider.class).iterator();
-        while (it.hasNext()) {
+        while (true) {
             NativeMachineFactoryProvider provider;
             try {
+                if (!it.hasNext()) {
+                    break;
+                }
                 provider = it.next();
             } catch (ServiceConfigurationError | LinkageError e) {
                 // This provider cannot be loaded on this JDK — the Panama runner is
-                // compiled for 25, so instantiating it on an older JDK fails here.
+                // compiled for 25, so loading it on an older JDK fails here.
                 // Skip it and let a lower-priority provider win.
                 //
-                // The catch must wrap next(): ServiceLoader reports these failures
-                // from the iterator, not from anything we do with the provider, so a
-                // for-each loop would let them escape. next() has already advanced
-                // past the failed provider, so this cannot spin.
+                // The catch must wrap both hasNext() and next(): ServiceLoader reports
+                // these failures from the iterator, and on the classpath it loads the
+                // provider class in hasNext(), so a for-each loop would let them escape.
+                // The failed provider has already been consumed, so this cannot spin.
                 continue;
             }
             if (best == null || provider.priority() > best.priority()) {
