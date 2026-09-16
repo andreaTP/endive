@@ -465,7 +465,11 @@ public class Instance implements AutoCloseable {
     }
 
     public WasmException exn(int idx) {
-        return exnRefs.get(idx);
+        var exn = exnRefs.get(idx);
+        if (exn == null) {
+            throw new TrapException("Trapped on throw_ref on null reference");
+        }
+        return exn;
     }
 
     @Deprecated
