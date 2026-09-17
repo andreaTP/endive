@@ -499,6 +499,7 @@ final class Validator {
             case -14: // NOEXTERN
                 return ValType.TypeIdxCode.EXTERN.code();
             case -23: // EXN
+            case -12: // NOEXN
                 return ValType.TypeIdxCode.EXN.code();
             default:
                 return heapTypeIdx;

@@ -854,6 +854,8 @@ public final class ModuleInterfaceCodegen {
             return "NoFuncRef";
         } else if (typeIdx == ValType.TypeIdxCode.NOEXTERN.code()) {
             return "NoExternRef";
+        } else if (typeIdx == ValType.TypeIdxCode.NOEXN.code()) {
+            return "NoExnRef";
         } else {
             return null;
         }

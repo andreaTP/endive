@@ -32,6 +32,8 @@ public enum WasmValueType {
     NULL_FUNC_REF("nullfuncref"),
     @JsonProperty("nullexternref")
     NULL_EXTERN_REF("nullexternref"),
+    @JsonProperty("nullexnref")
+    NULL_EXN_REF("nullexnref"),
     @JsonProperty("arrayref")
     ARRAY_REF("arrayref"),
     @JsonProperty("eqref")
