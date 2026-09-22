@@ -455,6 +455,28 @@ public class Instance implements AutoCloseable {
         return tags.length;
     }
 
+    /**
+     * @deprecated exception references are {@link WasmException} objects; regenerate any module
+     *     compiled ahead of time by an earlier version
+     */
+    @Deprecated
+    public int registerException(WasmException ex) {
+        throw new UnsupportedOperationException(
+                "Exception references are now WasmException objects. Regenerate the ahead-of-time"
+                        + " compiled module with the current Endive version.");
+    }
+
+    /**
+     * @deprecated exception references are {@link WasmException} objects; regenerate any module
+     *     compiled ahead of time by an earlier version
+     */
+    @Deprecated
+    public WasmException exn(int idx) {
+        throw new UnsupportedOperationException(
+                "Exception references are now WasmException objects. Regenerate the ahead-of-time"
+                        + " compiled module with the current Endive version.");
+    }
+
     @Deprecated
     public long[] array(int idx) {
         throw new UnsupportedOperationException(
