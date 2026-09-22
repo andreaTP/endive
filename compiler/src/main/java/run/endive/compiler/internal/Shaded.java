@@ -540,16 +540,9 @@ public final class Shaded {
         return e;
     }
 
+    /** Tags match by identity: an imported tag is the very same instance as the exported one. */
     public static boolean exceptionMatches(WasmException exception, int tag, Instance instance) {
-        if (exception.instance() == instance && exception.tagIdx() == tag) {
-            return true;
-        }
-
-        var currentCatchTag = instance.tag(tag);
-        var exceptionTag = exception.instance().tag(exception.tagIdx());
-        return tag < instance.imports().tagCount()
-                && currentCatchTag.type().typesMatch(exceptionTag.type())
-                && currentCatchTag.type().returnsMatch(exceptionTag.type());
+        return instance.tag(tag) == exception.instance().tag(exception.tagIdx());
     }
 
     // I32 32-bit RMW ops

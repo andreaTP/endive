@@ -3153,37 +3153,22 @@ public class InterpreterMachine implements Machine {
                 for (int i = 0; i < catches.size() && !found; i++) {
                     var currentCatch = catches.get(i);
 
-                    // verify import compatibility
-                    var compatibleImport = false;
+                    // A tag matches by identity, whether it is defined here or imported
                     if ((currentCatch.opcode() == CatchOpCode.CATCH
-                            || currentCatch.opcode() == CatchOpCode.CATCH_REF)) {
-                        var currentCatchTag = instance.tag(currentCatch.tag());
-                        var exceptionTag = exception.instance().tag(exception.tagIdx());
-
-                        // if it's an import we verify the compatibility
-                        if (currentCatch.tag() < instance.imports().tagCount()
-                                && currentCatchTag.type().paramsMatch(exceptionTag.type())
-                                && currentCatchTag.type().returnsMatch(exceptionTag.type())) {
-                            compatibleImport = true;
-                        } else if (exceptionTag != currentCatchTag) {
-                            // if it's not an import the tag should be the same
-                            continue;
-                        }
+                                    || currentCatch.opcode() == CatchOpCode.CATCH_REF)
+                            && !exceptionMatches(exception, currentCatch.tag(), instance)) {
+                        continue;
                     }
 
                     switch (currentCatch.opcode()) {
                         case CATCH:
-                            if (currentCatch.tag() == exception.tagIdx() || compatibleImport) {
-                                found = true;
-                                pushExceptionArgs(exception, stack);
-                            }
+                            found = true;
+                            pushExceptionArgs(exception, stack);
                             break;
                         case CATCH_REF:
-                            if (currentCatch.tag() == exception.tagIdx() || compatibleImport) {
-                                found = true;
-                                pushExceptionArgs(exception, stack);
-                                stack.pushRef(exception);
-                            }
+                            found = true;
+                            pushExceptionArgs(exception, stack);
+                            stack.pushRef(exception);
                             break;
                         case CATCH_ALL:
                             found = true;
@@ -3976,6 +3961,11 @@ public class InterpreterMachine implements Machine {
                 slot++;
             }
         }
+    }
+
+    /** Tags match by identity: an imported tag is the very same instance as the exported one. */
+    static boolean exceptionMatches(WasmException exception, int tag, Instance instance) {
+        return instance.tag(tag) == exception.instance().tag(exception.tagIdx());
     }
 
     private static boolean isExternHeapType(int heapType) {
