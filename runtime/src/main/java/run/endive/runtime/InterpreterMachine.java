@@ -88,12 +88,14 @@ public class InterpreterMachine implements Machine {
         // When called via call(int, long[]) with no refArgs and the function
         // has externref params, populate refArgs from longs so the ref stack
         // is set up correctly. Uses WasmExternRef (the proper externref type).
+        // Only externref has a meaningful long encoding here; any other object
+        // ref stays null rather than being wrapped in the wrong type.
         if (refArgs == null && type.hasObjectRefParams()) {
             refArgs = new Object[args.length];
             int slot = 0;
             for (int pi = 0; pi < type.params().size(); pi++) {
                 var param = type.params().get(pi);
-                if (param.isObjectRef()) {
+                if (param.isObjectRef() && isExternHeapType(param.typeIdx())) {
                     long val = args[slot];
                     refArgs[slot] = (val == REF_NULL_VALUE) ? null : new WasmExternRef(val);
                 }
@@ -159,7 +161,7 @@ public class InterpreterMachine implements Machine {
                     }
                 }
             } catch (WasmException e) {
-                THROW_REF(instance, instance.registerException(e), stack, stackFrame, callStack);
+                THROW_REF(instance, e, stack, stackFrame, callStack);
             } catch (StackOverflowError e) {
                 throw new WasmEngineException("call stack exhausted", e);
             } finally {
@@ -348,14 +350,12 @@ public class InterpreterMachine implements Machine {
                                         .args(args)
                                         .refArgs(refArgs)
                                         .build();
-                        var exceptionIdx = instance.registerException(exception);
-                        frame = THROW_REF(instance, exceptionIdx, stack, frame, callStack);
+                        frame = THROW_REF(instance, exception, stack, frame, callStack);
                         break;
                     }
                 case THROW_REF:
                     {
-                        var exceptionIdx = (int) stack.pop();
-                        frame = THROW_REF(instance, exceptionIdx, stack, frame, callStack);
+                        frame = THROW_REF(instance, stack.popRef(), stack, frame, callStack);
                         break;
                     }
                 case CALL_INDIRECT:
@@ -1874,9 +1874,7 @@ public class InterpreterMachine implements Machine {
     private static void REF_NULL(MStack stack, Operands operands) {
         var heapType = (int) operands.get(0);
         if (heapType == ValType.TypeIdxCode.FUNC.code()
-                || heapType == ValType.TypeIdxCode.NOFUNC.code()
-                || heapType == ValType.TypeIdxCode.EXN.code()
-                || heapType == ValType.TypeIdxCode.NOEXN.code()) {
+                || heapType == ValType.TypeIdxCode.NOFUNC.code()) {
             stack.push(REF_NULL_VALUE);
         } else {
             // GC refs, externref, noexternref all use Object null
@@ -2906,7 +2904,7 @@ public class InterpreterMachine implements Machine {
                         }
                     }
                 } catch (WasmException e) {
-                    THROW_REF(instance, instance.registerException(e), stack, newFrame, callStack);
+                    THROW_REF(instance, e, stack, newFrame, callStack);
                 }
                 if (fromCallStack) {
                     callStack.push(newFrame);
@@ -3003,7 +3001,7 @@ public class InterpreterMachine implements Machine {
                         }
                     }
                 } catch (WasmException e) {
-                    THROW_REF(instance, instance.registerException(e), stack, newFrame, callStack);
+                    THROW_REF(instance, e, stack, newFrame, callStack);
                 }
                 if (fromCallStack) {
                     callStack.push(newFrame);
@@ -3135,11 +3133,11 @@ public class InterpreterMachine implements Machine {
 
     protected static StackFrame THROW_REF(
             Instance instance,
-            int exceptionIdx,
+            Object exnRef,
             MStack stack,
             StackFrame frame,
             Deque<StackFrame> callStack) {
-        var exception = instance.exn(exceptionIdx);
+        var exception = WasmException.checked(exnRef);
         boolean found = false;
         while (!found) {
             while (frame.ctrlStackSize() > 0) {
@@ -3155,44 +3153,29 @@ public class InterpreterMachine implements Machine {
                 for (int i = 0; i < catches.size() && !found; i++) {
                     var currentCatch = catches.get(i);
 
-                    // verify import compatibility
-                    var compatibleImport = false;
+                    // A tag matches by identity, whether it is defined here or imported
                     if ((currentCatch.opcode() == CatchOpCode.CATCH
-                            || currentCatch.opcode() == CatchOpCode.CATCH_REF)) {
-                        var currentCatchTag = instance.tag(currentCatch.tag());
-                        var exceptionTag = exception.instance().tag(exception.tagIdx());
-
-                        // if it's an import we verify the compatibility
-                        if (currentCatch.tag() < instance.imports().tagCount()
-                                && currentCatchTag.type().paramsMatch(exceptionTag.type())
-                                && currentCatchTag.type().returnsMatch(exceptionTag.type())) {
-                            compatibleImport = true;
-                        } else if (exceptionTag != currentCatchTag) {
-                            // if it's not an import the tag should be the same
-                            continue;
-                        }
+                                    || currentCatch.opcode() == CatchOpCode.CATCH_REF)
+                            && !exceptionMatches(exception, currentCatch.tag(), instance)) {
+                        continue;
                     }
 
                     switch (currentCatch.opcode()) {
                         case CATCH:
-                            if (currentCatch.tag() == exception.tagIdx() || compatibleImport) {
-                                found = true;
-                                pushExceptionArgs(exception, stack);
-                            }
+                            found = true;
+                            pushExceptionArgs(exception, stack);
                             break;
                         case CATCH_REF:
-                            if (currentCatch.tag() == exception.tagIdx() || compatibleImport) {
-                                found = true;
-                                pushExceptionArgs(exception, stack);
-                                stack.push(exceptionIdx);
-                            }
+                            found = true;
+                            pushExceptionArgs(exception, stack);
+                            stack.pushRef(exception);
                             break;
                         case CATCH_ALL:
                             found = true;
                             break;
                         case CATCH_ALL_REF:
                             found = true;
-                            stack.push(exceptionIdx);
+                            stack.pushRef(exception);
                             break;
                     }
 
@@ -3980,13 +3963,21 @@ public class InterpreterMachine implements Machine {
         }
     }
 
+    /** Tags match by identity: an imported tag is the very same instance as the exported one. */
+    static boolean exceptionMatches(WasmException exception, int tag, Instance instance) {
+        return instance.tag(tag) == exception.instance().tag(exception.tagIdx());
+    }
+
+    private static boolean isExternHeapType(int heapType) {
+        return heapType == ValType.TypeIdxCode.EXTERN.code()
+                || heapType == ValType.TypeIdxCode.NOEXTERN.code();
+    }
+
     private static boolean isSourceGcRef(int sourceHeapType) {
         return sourceHeapType != ValType.TypeIdxCode.FUNC.code()
                 && sourceHeapType != ValType.TypeIdxCode.NOFUNC.code()
                 && sourceHeapType != ValType.TypeIdxCode.EXTERN.code()
-                && sourceHeapType != ValType.TypeIdxCode.NOEXTERN.code()
-                && sourceHeapType != ValType.TypeIdxCode.EXN.code()
-                && sourceHeapType != ValType.TypeIdxCode.NOEXN.code();
+                && sourceHeapType != ValType.TypeIdxCode.NOEXTERN.code();
     }
 
     private static void REF_TEST(

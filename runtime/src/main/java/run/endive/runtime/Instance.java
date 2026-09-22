@@ -72,8 +72,6 @@ public class Instance implements AutoCloseable {
     private final ExecutionListener listener;
     private final Exports fluentExports;
 
-    private final Map<Integer, WasmException> exnRefs;
-
     private TailCallPending tailCallPending;
 
     static final class TailCallPending {
@@ -134,8 +132,6 @@ public class Instance implements AutoCloseable {
         this.listener = listener;
         this.globalFactory = globalFactory;
         this.fluentExports = new Exports(this);
-
-        this.exnRefs = new HashMap<>();
 
         for (int i = 0; i < tables.length; i++) {
             var result = computeConstant(this, tables[i].initialize());
@@ -298,7 +294,7 @@ public class Instance implements AutoCloseable {
                         throw new UnsupportedOperationException(
                                 "Function '"
                                         + name
-                                        + "' uses GC reference types."
+                                        + "' uses reference types carried as objects."
                                         + " Use applyWithRefs().");
                     }
                     return instance.machine.call(export.index(), args);
@@ -459,17 +455,26 @@ public class Instance implements AutoCloseable {
         return tags.length;
     }
 
+    /**
+     * @deprecated exception references are {@link WasmException} objects; regenerate any module
+     *     compiled ahead of time by an earlier version
+     */
+    @Deprecated
     public int registerException(WasmException ex) {
-        exnRefs.put(ex.tagIdx(), ex);
-        return ex.tagIdx();
+        throw new UnsupportedOperationException(
+                "Exception references are now WasmException objects. Regenerate the ahead-of-time"
+                        + " compiled module with the current Endive version.");
     }
 
+    /**
+     * @deprecated exception references are {@link WasmException} objects; regenerate any module
+     *     compiled ahead of time by an earlier version
+     */
+    @Deprecated
     public WasmException exn(int idx) {
-        var exn = exnRefs.get(idx);
-        if (exn == null) {
-            throw new TrapException("Trapped on throw_ref on null reference");
-        }
-        return exn;
+        throw new UnsupportedOperationException(
+                "Exception references are now WasmException objects. Regenerate the ahead-of-time"
+                        + " compiled module with the current Endive version.");
     }
 
     @Deprecated
@@ -541,6 +546,9 @@ public class Instance implements AutoCloseable {
         if (targetHeapType == ValType.TypeIdxCode.FUNC.code()
                 || targetHeapType == ValType.TypeIdxCode.EXTERN.code()) {
             return true;
+        }
+        if (targetHeapType == ValType.TypeIdxCode.EXN.code()) {
+            return ref instanceof WasmException;
         }
         if (ref instanceof WasmGcRef) {
             return heapTypeSubOf(((WasmGcRef) ref).typeIdx(), targetHeapType);
