@@ -2457,8 +2457,8 @@ public class InterpreterMachine implements Machine {
         if (localType.isObjectRef()) {
             currentStackFrame.setLocalRef(i, stack.popRef());
         } else if (localType.equals(ValType.V128)) {
-            currentStackFrame.setLocal(i, stack.pop());
             currentStackFrame.setLocal(i + 1, stack.pop());
+            currentStackFrame.setLocal(i, stack.pop());
         } else {
             currentStackFrame.setLocal(i, stack.pop());
         }
@@ -2472,10 +2472,10 @@ public class InterpreterMachine implements Machine {
         if (localType.isObjectRef()) {
             currentStackFrame.setLocalRef(i, stack.peekRef());
         } else if (localType.equals(ValType.V128)) {
-            var tmp = stack.pop();
-            currentStackFrame.setLocal(i, tmp);
-            currentStackFrame.setLocal(i + 1, stack.peek());
-            stack.push(tmp);
+            var high = stack.pop();
+            currentStackFrame.setLocal(i + 1, high);
+            currentStackFrame.setLocal(i, stack.peek());
+            stack.push(high);
         } else {
             currentStackFrame.setLocal(i, stack.peek());
         }
