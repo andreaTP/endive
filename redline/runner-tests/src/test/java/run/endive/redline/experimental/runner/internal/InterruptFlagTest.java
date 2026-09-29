@@ -3,6 +3,7 @@ package run.endive.redline.experimental.runner.internal;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
+import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import run.endive.corpus.CorpusResources;
@@ -39,7 +40,7 @@ public class InterruptFlagTest {
                                 new HostFunction(
                                         "host",
                                         "raiseFlag",
-                                        FunctionType.of(java.util.List.of(), java.util.List.of()),
+                                        FunctionType.of(List.of(), List.of()),
                                         (inst, args) -> {
                                             machineRef[0].requestInterrupt();
                                             return null;
@@ -67,6 +68,52 @@ public class InterruptFlagTest {
             assertFalse(
                     Thread.currentThread().isInterrupted(),
                     "no interrupt happened, so the caller must not be left interrupted");
+        }
+    }
+
+    @Test
+    public void aFlagRaisedInANestedCallDoesNotStopTheOuterCall() {
+        var module =
+                Parser.parse(CorpusResources.getResource("compiled/reentrant-interrupt.wat.wasm"));
+
+        var machineRef = new NativeMachine[1];
+        var imports =
+                ImportValues.builder()
+                        .addFunction(
+                                new HostFunction(
+                                        "host",
+                                        "reenter",
+                                        FunctionType.of(List.of(), List.of()),
+                                        (inst, args) -> {
+                                            inst.export("raise").apply();
+                                            return null;
+                                        }))
+                        .addFunction(
+                                new HostFunction(
+                                        "host",
+                                        "raiseFlag",
+                                        FunctionType.of(List.of(), List.of()),
+                                        (inst, args) -> {
+                                            machineRef[0].requestInterrupt();
+                                            return null;
+                                        }))
+                        .build();
+
+        try (var instance =
+                NativeMachineFactory.builder(module)
+                        .withImportValues(imports)
+                        .withCompilerFunction(
+                                m ->
+                                        NativeCompiler.compileAll(
+                                                RedlineTarget.detectHost().orElseThrow().triple(),
+                                                m))
+                        .build()) {
+            machineRef[0] = (NativeMachine) instance.getMachine();
+
+            assertEquals(
+                    1000,
+                    (int) instance.export("run").apply()[0],
+                    "a flag left over from the nested call must not stop the outer one");
         }
     }
 }

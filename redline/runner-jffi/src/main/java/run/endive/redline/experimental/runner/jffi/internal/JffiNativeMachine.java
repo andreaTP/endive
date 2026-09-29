@@ -42,7 +42,7 @@ import run.endive.wasm.types.Value;
  *   return: Wasm return value
  * </pre>
  */
-public final class JffiNativeMachine implements Machine {
+public final class JffiNativeMachine implements Machine, InterruptWatchdog.InterruptSink {
 
     private static final int CTX_SIZE = CtxBuffer.CTX_SIZE;
     private static final MemoryIO MEM = MemoryIO.getInstance();
@@ -89,9 +89,7 @@ public final class JffiNativeMachine implements Machine {
     private final CallContext[] entryTrampolineCallCtxs; // entry trampoline CallContext per func
     private final long[] entryTrampolineAddrs; // entry trampoline native addr per func
 
-    // Only the >6-native-arg path needs a Function, and it is a pure value holder over
-    // (address, context) whose dispose() is a no-op, so it is built once per function
-    // rather than on every call.
+    // built once per function instead of per call, for the >6-native-arg path
     private final Function[] entryTrampolineFunctions;
     private final FunctionType[] funcTypes; // wasm FunctionType per func
     private final long codeRegionAddr;
@@ -1080,19 +1078,13 @@ public final class JffiNativeMachine implements Machine {
                 MEM.putInt(ctxBufferAddr + CtxBuffer.MEMORY_PAGES, mem.pages());
             }
 
-            if (Thread.interrupted()) {
+            if (Thread.currentThread().isInterrupted()) {
                 throw new TrapException("interrupted");
             }
 
-            // Only the outermost call registers. A nested call runs on the same
-            // thread, inside the same watched window, so watching it again would
-            // buy nothing — and re-entry through a host function is common enough
-            // that doing so once dominated the cost of the call itself.
+            // nested calls run inside the outermost call's watch
             InterruptWatchdog.Registration watchdog =
-                    outermostCall
-                            ? InterruptWatchdog.enter(
-                                    Thread.currentThread(), this::requestInterrupt)
-                            : null;
+                    outermostCall ? InterruptWatchdog.enter(Thread.currentThread(), this) : null;
             long result;
             try {
                 result =
@@ -1107,14 +1099,10 @@ public final class JffiNativeMachine implements Machine {
                                 args);
             } finally {
                 if (watchdog != null) {
-                    // Deregister before clearing: exit() guarantees the poller is
-                    // not part-way through raising the flag, so the clear below
-                    // cannot be undone behind our back.
+                    // exit first, so the poller cannot raise the flag after the clear
                     InterruptWatchdog.exit(watchdog);
-                    // The flag only ever means "stop this call". Left set it would
-                    // trap the next one on a thread nobody interrupted.
-                    clearInterrupt();
                 }
+                clearInterrupt();
             }
 
             // Check for exceptions from upcall stubs first — a host function
@@ -1169,6 +1157,7 @@ public final class JffiNativeMachine implements Machine {
         }
     }
 
+    @Override
     public void requestInterrupt() {
         CHECKED_MEM.putLong(ctxBufferAddr + CtxBuffer.INTERRUPT_FLAG, 1L);
     }

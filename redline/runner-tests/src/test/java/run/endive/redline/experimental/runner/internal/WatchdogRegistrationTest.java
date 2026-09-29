@@ -5,49 +5,35 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.management.ManagementFactory;
 import java.util.List;
-import java.util.function.IntConsumer;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import run.endive.corpus.CorpusResources;
 import run.endive.redline.experimental.api.internal.InterruptWatchdog;
-import run.endive.redline.experimental.api.internal.RedlineTarget;
-import run.endive.redline.experimental.compiler.internal.NativeCompiler;
-import run.endive.redline.experimental.runner.NativeMachineFactory;
 import run.endive.runtime.HostFunction;
 import run.endive.runtime.ImportValues;
 import run.endive.runtime.Instance;
+import run.endive.testing.NativeInstanceBuilder;
 import run.endive.wasm.Parser;
 import run.endive.wasm.types.FunctionType;
 
-/**
- * Interrupting a call means raising a flag that compiled code polls, and the JVM offers no
- * callback on {@link Thread#interrupt()} to raise it from. The runners used to answer that
- * with a fresh thread per call, which a host function calling back into an export paid
- * again for every nested level.
- *
- * <p>These two tests pin the replacement from both ends: one registration per outermost
- * call however deep the nesting goes, and no threads started as a result of calling.
- */
+/** Calls are watched by the shared poller, one registration per outermost call. */
 public class WatchdogRegistrationTest {
 
-    /** Nesting per call. Well clear of the reentrant stack guard, which fires near 115. */
+    // well below the reentrant stack guard, which fires near 115
     private static final int DEPTH = 20;
 
     private static final int ROUNDS = 20;
 
     @Test
-    public void nestingAddsNoRegistrations() {
+    public void nestingRegistersOnlyTheOutermostCall() {
+        int before = InterruptWatchdog.activeCount();
         int[] deepest = {0};
         withReentrantInstance(
-                instance -> {
-                    instance.export("recurse").apply();
-                },
-                level -> deepest[0] = Math.max(deepest[0], InterruptWatchdog.activeCount()));
+                instance -> instance.export("recurse").apply(),
+                () -> deepest[0] = Math.max(deepest[0], InterruptWatchdog.activeCount()));
 
-        assertEquals(
-                1,
-                deepest[0],
-                "a nested call runs on the same thread inside the same watched window, so it"
-                        + " must reuse the outermost call's registration");
+        assertEquals(1, deepest[0] - before);
+        assertEquals(before, InterruptWatchdog.activeCount());
     }
 
     @Test
@@ -57,8 +43,7 @@ public class WatchdogRegistrationTest {
 
         withReentrantInstance(
                 instance -> {
-                    // One call first, so the shared poller is already running by the time
-                    // the counter is read.
+                    // starts the shared poller
                     instance.export("recurse").apply();
 
                     long before = threads.getTotalStartedThreadCount();
@@ -67,21 +52,13 @@ public class WatchdogRegistrationTest {
                     }
                     started[0] = threads.getTotalStartedThreadCount() - before;
                 },
-                level -> {});
+                () -> {});
 
-        // Generous, because the JIT may start compiler threads while this runs. The
-        // behaviour being excluded started one thread per call, so ROUNDS * (DEPTH + 1).
-        assertTrue(
-                started[0] < ROUNDS,
-                "calling must not start a thread per call, but "
-                        + started[0]
-                        + " threads started across "
-                        + (ROUNDS * (DEPTH + 1))
-                        + " calls");
+        // loose bound: JIT compiler threads may start meanwhile
+        assertTrue(started[0] < ROUNDS, started[0] + " threads started");
     }
 
-    private static void withReentrantInstance(
-            java.util.function.Consumer<Instance> body, IntConsumer atEachLevel) {
+    private static void withReentrantInstance(Consumer<Instance> body, Runnable atEachLevel) {
         var module =
                 Parser.parse(CorpusResources.getResource("compiled/reentrant-recursion.wat.wasm"));
 
@@ -94,7 +71,7 @@ public class WatchdogRegistrationTest {
                                         "reenter",
                                         FunctionType.of(List.of(), List.of()),
                                         (Instance inst, long... args) -> {
-                                            atEachLevel.accept(depth[0]);
+                                            atEachLevel.run();
                                             if (depth[0]++ < DEPTH) {
                                                 inst.export("recurse").apply();
                                             }
@@ -104,14 +81,7 @@ public class WatchdogRegistrationTest {
                         .build();
 
         try (var instance =
-                NativeMachineFactory.builder(module)
-                        .withImportValues(imports)
-                        .withCompilerFunction(
-                                m ->
-                                        NativeCompiler.compileAll(
-                                                RedlineTarget.detectHost().orElseThrow().triple(),
-                                                m))
-                        .build()) {
+                NativeInstanceBuilder.builder(module).withImportValues(imports).build()) {
             body.accept(instance);
         }
     }

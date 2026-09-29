@@ -41,7 +41,7 @@ import run.endive.wasm.types.Value;
  *
  * <p>See {@link CtxBuffer} for the full layout definition.
  */
-public final class NativeMachine implements Machine {
+public final class NativeMachine implements Machine, InterruptWatchdog.InterruptSink {
 
     private static final int CTX_SIZE = CtxBuffer.CTX_SIZE;
 
@@ -1080,32 +1080,22 @@ public final class NativeMachine implements Machine {
                 ctxBuffer.set(ValueLayout.JAVA_INT, CtxBuffer.MEMORY_PAGES, mem.pages());
             }
 
-            if (Thread.interrupted()) {
+            if (Thread.currentThread().isInterrupted()) {
                 throw new TrapException("interrupted");
             }
 
-            // Only the outermost call registers. A nested call runs on the same
-            // thread, inside the same watched window, so watching it again would
-            // buy nothing — and re-entry through a host function is common enough
-            // that doing so once dominated the cost of the call itself.
+            // nested calls run inside the outermost call's watch
             InterruptWatchdog.Registration watchdog =
-                    outermostCall
-                            ? InterruptWatchdog.enter(
-                                    Thread.currentThread(), this::requestInterrupt)
-                            : null;
+                    outermostCall ? InterruptWatchdog.enter(Thread.currentThread(), this) : null;
             long result;
             try {
                 result = (long) handle.invokeExact(cachedMemBase, ctxBuffer, args);
             } finally {
                 if (watchdog != null) {
-                    // Deregister before clearing: exit() guarantees the poller is
-                    // not part-way through raising the flag, so the clear below
-                    // cannot be undone behind our back.
+                    // exit first, so the poller cannot raise the flag after the clear
                     InterruptWatchdog.exit(watchdog);
-                    // The flag only ever means "stop this call". Left set it would
-                    // trap the next one on a thread nobody interrupted.
-                    clearInterrupt();
                 }
+                clearInterrupt();
             }
 
             // Check for exceptions from upcall stubs first — a host function
@@ -1159,6 +1149,7 @@ public final class NativeMachine implements Machine {
         }
     }
 
+    @Override
     public void requestInterrupt() {
         ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.INTERRUPT_FLAG, 1L);
     }
