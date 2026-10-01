@@ -1086,7 +1086,7 @@ public final class NativeMachine implements Machine, InterruptWatchdog.Interrupt
 
             // nested calls run inside the outermost call's watch
             InterruptWatchdog.Registration watchdog =
-                    outermostCall ? InterruptWatchdog.enter(Thread.currentThread(), this) : null;
+                    outermostCall ? InterruptWatchdog.enter(this) : null;
             long result;
             try {
                 result = (long) handle.invokeExact(cachedMemBase, ctxBuffer, args);
@@ -1114,7 +1114,6 @@ public final class NativeMachine implements Machine, InterruptWatchdog.Interrupt
             if (trapCode != 0) {
                 ctxBuffer.set(ValueLayout.JAVA_INT, CtxBuffer.TRAP_CODE, 0);
                 if (trapCode == CtxBuffer.TRAP_INTERRUPTED) {
-                    ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.INTERRUPT_FLAG, 0L);
                     Thread.currentThread().interrupt();
                 }
                 throw trapException(trapCode);
@@ -1154,7 +1153,7 @@ public final class NativeMachine implements Machine, InterruptWatchdog.Interrupt
         ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.INTERRUPT_FLAG, 1L);
     }
 
-    public void clearInterrupt() {
+    private void clearInterrupt() {
         ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.INTERRUPT_FLAG, 0L);
     }
 

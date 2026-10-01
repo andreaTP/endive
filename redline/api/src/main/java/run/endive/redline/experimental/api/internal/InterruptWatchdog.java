@@ -3,23 +3,35 @@ package run.endive.redline.experimental.api.internal;
 import java.util.Iterator;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
-/**
- * Raises {@link CtxBuffer#INTERRUPT_FLAG} for calls whose thread is interrupted, from a single
- * daemon poller shared by all machines.
- */
+/** Raises {@link CtxBuffer#INTERRUPT_FLAG} for watched calls whose thread is interrupted. */
 public final class InterruptWatchdog {
 
-    private static final long POLL_INTERVAL_NANOS = 1_000_000L;
+    private static final Logger LOG = Logger.getLogger(InterruptWatchdog.class.getName());
+
+    private static final long POLL_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(1);
+
+    // how long the poller waits without calls before it exits; tests shorten it
+    static final AtomicLong IDLE_EXIT_NANOS = new AtomicLong(TimeUnit.MINUTES.toNanos(1));
+
+    // STATE holds the RUNNING and IDLE flags of the poller plus CALL per watched call
+    private static final int RUNNING = 1;
+
+    private static final int IDLE = 2;
+
+    private static final int CALL = 4;
+
+    private static final AtomicInteger STATE = new AtomicInteger();
 
     private static final Set<Registration> ACTIVE = ConcurrentHashMap.newKeySet();
 
-    private static final AtomicReference<Thread> POLLER = new AtomicReference<>();
-
-    // true while the poller is parked with nothing to watch
-    private static volatile boolean idle;
+    private static volatile Thread poller;
 
     private InterruptWatchdog() {}
 
@@ -29,21 +41,29 @@ public final class InterruptWatchdog {
         void requestInterrupt();
     }
 
-    /** Watches {@code caller} until the returned handle is passed to {@link #exit}. */
-    public static Registration enter(Thread caller, InterruptSink sink) {
-        var poller = poller();
-        var registration = new Registration(caller, sink);
+    /** Watches the current thread until the returned handle is passed to {@link #exit}. */
+    public static Registration enter(InterruptSink sink) {
+        var registration = new Registration(Thread.currentThread(), sink);
         ACTIVE.add(registration);
-        if (idle) {
-            LockSupport.unpark(poller);
+        int state = STATE.getAndAdd(CALL);
+        try {
+            if ((state & RUNNING) == 0) {
+                ensurePoller();
+            } else if ((state & IDLE) != 0 && (STATE.getAndUpdate(s -> s & ~IDLE) & IDLE) != 0) {
+                LockSupport.unpark(poller);
+            }
+        } catch (RuntimeException | Error e) {
+            exit(registration);
+            throw e;
         }
         return registration;
     }
 
-    /** Stops watching; once this returns the poller can no longer raise the flag for it. */
+    /** Stops watching; once this returns the poller can no longer raise the flag. */
     public static void exit(Registration registration) {
         registration.deactivate();
         ACTIVE.remove(registration);
+        STATE.getAndAdd(-CALL);
     }
 
     /** Visible for testing. */
@@ -51,17 +71,21 @@ public final class InterruptWatchdog {
         return ACTIVE.size();
     }
 
-    private static Thread poller() {
-        Thread existing = POLLER.get();
-        if (existing != null) {
-            return existing;
+    static boolean pollerRunning() {
+        return (STATE.get() & RUNNING) != 0;
+    }
+
+    static boolean pollerIdle() {
+        return (STATE.get() & IDLE) != 0;
+    }
+
+    @SuppressWarnings("ThreadPriorityCheck") // not the priority of whichever caller starts it
+    private static void ensurePoller() {
+        if ((STATE.getAndUpdate(s -> s | RUNNING) & RUNNING) != 0) {
+            return;
         }
-        synchronized (InterruptWatchdog.class) {
-            existing = POLLER.get();
-            if (existing != null) {
-                return existing;
-            }
-            // no thread locals or class loader from whichever caller starts it
+        try {
+            // no thread locals or class loader from the caller either
             var thread =
                     new Thread(
                             null,
@@ -71,38 +95,68 @@ public final class InterruptWatchdog {
                             false);
             thread.setDaemon(true);
             thread.setContextClassLoader(null);
+            thread.setPriority(Thread.NORM_PRIORITY);
+            poller = thread;
             thread.start();
-            POLLER.set(thread);
-            return thread;
+        } catch (RuntimeException | Error e) {
+            STATE.getAndAdd(-RUNNING);
+            throw e;
         }
     }
 
     private static void pollLoop() {
-        while (true) {
-            // an interrupt status would make every park return at once
-            Thread.interrupted();
-            if (ACTIVE.isEmpty()) {
-                idle = true;
-                // re-check, enter() may have read idle before it was set
-                if (ACTIVE.isEmpty()) {
-                    LockSupport.park();
+        boolean retired = false;
+        try {
+            while (true) {
+                // an interrupt status would make every park return at once
+                Thread.interrupted();
+                if (STATE.get() < CALL && idleUntilExit()) {
+                    retired = true;
+                    return;
                 }
-                idle = false;
-                continue;
+                pollAll();
+                LockSupport.parkNanos(POLL_INTERVAL_NANOS);
             }
-            for (Iterator<Registration> it = ACTIVE.iterator(); it.hasNext(); ) {
-                try {
-                    it.next().poll();
-                } catch (RuntimeException e) {
-                    // a failing sink must not stop the poller for everyone else
-                    it.remove();
-                }
+        } finally {
+            if (!retired && STATE.updateAndGet(s -> s & ~(RUNNING | IDLE)) >= CALL) {
+                // died on an error: hand the watched calls to a new poller
+                ensurePoller();
             }
-            LockSupport.parkNanos(POLL_INTERVAL_NANOS);
         }
     }
 
-    /** One in-flight call. */
+    // parks until a call clears IDLE or the idle time passes; true if the poller should exit
+    private static boolean idleUntilExit() {
+        if (!STATE.compareAndSet(RUNNING, RUNNING | IDLE)) {
+            return false;
+        }
+        long deadline = System.nanoTime() + IDLE_EXIT_NANOS.get();
+        long left;
+        while ((STATE.get() & IDLE) != 0 && (left = deadline - System.nanoTime()) > 0) {
+            LockSupport.parkNanos(left);
+            Thread.interrupted();
+        }
+        if (STATE.compareAndSet(RUNNING | IDLE, 0)) {
+            return true;
+        }
+        STATE.getAndUpdate(s -> s & ~IDLE);
+        return false;
+    }
+
+    private static void pollAll() {
+        for (Iterator<Registration> it = ACTIVE.iterator(); it.hasNext(); ) {
+            var registration = it.next();
+            try {
+                registration.poll();
+            } catch (RuntimeException | Error e) {
+                // a broken sink: stop watching that call rather than every call
+                it.remove();
+                LOG.log(Level.WARNING, "Stopped watching a call whose interrupt flag failed", e);
+            }
+        }
+    }
+
+    /** One watched call. */
     public static final class Registration {
 
         private final Thread caller;
@@ -114,11 +168,13 @@ public final class InterruptWatchdog {
             this.sink = sink;
         }
 
-        // synchronized with deactivate(), so the flag is never raised after exit()
+        // the lock pairs with deactivate(), so the flag is never raised after exit()
         private void poll() {
-            synchronized (this) {
-                if (active && caller.isInterrupted()) {
-                    sink.requestInterrupt();
+            if (caller.isInterrupted()) {
+                synchronized (this) {
+                    if (active) {
+                        sink.requestInterrupt();
+                    }
                 }
             }
         }

@@ -2,6 +2,7 @@
 (module
   (import "host" "reenter" (func $reenter))
   (import "host" "raiseFlag" (func $raiseFlag))
+  (import "host" "tick" (func $tick))
 
   (func (export "run") (result i32)
     (local $i i32)
@@ -15,5 +16,7 @@
     (call $raiseFlag))
 
   (func (export "spin")
-    (loop $l (br $l)))
+    (loop $l
+      (call $tick)
+      (br $l)))
 )

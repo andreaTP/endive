@@ -7,11 +7,9 @@ import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import run.endive.corpus.CorpusResources;
-import run.endive.redline.experimental.api.internal.RedlineTarget;
-import run.endive.redline.experimental.compiler.internal.NativeCompiler;
-import run.endive.redline.experimental.runner.jffi.JffiNativeMachineFactory;
 import run.endive.runtime.HostFunction;
 import run.endive.runtime.ImportValues;
+import run.endive.testing.NativeInstanceBuilder;
 import run.endive.wasm.Parser;
 import run.endive.wasm.types.FunctionType;
 
@@ -48,14 +46,7 @@ public class InterruptFlagTest {
                         .build();
 
         try (var instance =
-                JffiNativeMachineFactory.builder(module)
-                        .withImportValues(imports)
-                        .withCompilerFunction(
-                                m ->
-                                        NativeCompiler.compileAll(
-                                                RedlineTarget.detectHost().orElseThrow().triple(),
-                                                m))
-                        .build()) {
+                NativeInstanceBuilder.builder(module).withImportValues(imports).build()) {
             machineRef[0] = (JffiNativeMachine) instance.getMachine();
 
             // Returns normally: the entry check ran before the flag was raised.
@@ -97,17 +88,16 @@ public class InterruptFlagTest {
                                             machineRef[0].requestInterrupt();
                                             return null;
                                         }))
+                        .addFunction(
+                                new HostFunction(
+                                        "host",
+                                        "tick",
+                                        FunctionType.of(List.of(), List.of()),
+                                        (inst, args) -> null))
                         .build();
 
         try (var instance =
-                JffiNativeMachineFactory.builder(module)
-                        .withImportValues(imports)
-                        .withCompilerFunction(
-                                m ->
-                                        NativeCompiler.compileAll(
-                                                RedlineTarget.detectHost().orElseThrow().triple(),
-                                                m))
-                        .build()) {
+                NativeInstanceBuilder.builder(module).withImportValues(imports).build()) {
             machineRef[0] = (JffiNativeMachine) instance.getMachine();
 
             assertEquals(

@@ -86,11 +86,7 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
     }
 
     private final Instance instance;
-    private final CallContext[] entryTrampolineCallCtxs; // entry trampoline CallContext per func
-    private final long[] entryTrampolineAddrs; // entry trampoline native addr per func
-
-    // built once per function instead of per call, for the >6-native-arg path
-    private final Function[] entryTrampolineFunctions;
+    private final Function[] entryTrampolines; // entry trampoline per func
     private final FunctionType[] funcTypes; // wasm FunctionType per func
     private final long codeRegionAddr;
     private final int codeRegionOsPages;
@@ -141,9 +137,7 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
                                                                 .FUNCTION)
                                 .count();
         int totalFuncs = numImports + module.codeSection().functionBodyCount();
-        this.entryTrampolineCallCtxs = new CallContext[totalFuncs];
-        this.entryTrampolineAddrs = new long[totalFuncs];
-        this.entryTrampolineFunctions = new Function[totalFuncs];
+        this.entryTrampolines = new Function[totalFuncs];
         this.funcTypes = new FunctionType[totalFuncs];
         this.importHandles = new Closure.Handle[numImports];
 
@@ -378,13 +372,10 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
                 for (int i = 0; i < compiledCode.length; i++) {
                     if (compiledCode[i] != null) {
                         int funcId = numImports + i;
-                        entryTrampolineAddrs[funcId] = entryTrampolinePtrs.get(funcTypesByBody[i]);
-                        entryTrampolineCallCtxs[funcId] =
-                                createEntryTrampolineCallContext(funcTypesByBody[i]);
-                        entryTrampolineFunctions[funcId] =
+                        entryTrampolines[funcId] =
                                 new Function(
-                                        entryTrampolineAddrs[funcId],
-                                        entryTrampolineCallCtxs[funcId]);
+                                        entryTrampolinePtrs.get(funcTypesByBody[i]),
+                                        createEntryTrampolineCallContext(funcTypesByBody[i]));
                     }
                 }
             }
@@ -948,9 +939,7 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
     // --- Native function invocation ---
 
     private long invokeViaEntryTrampoline(
-            CallContext trampolineCallCtx,
-            long trampolineAddr,
-            Function trampolineFunction,
+            Function trampoline,
             FunctionType funcType,
             long funcAddr,
             long memBase,
@@ -958,6 +947,8 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
             long[] wasmArgs) {
         // nativeArgCount = funcPtr + memBase + ctxPtr + wasm params
         int nativeArgCount = 3 + wasmArgs.length;
+        CallContext trampolineCallCtx = trampoline.getCallContext();
+        long trampolineAddr = trampoline.getFunctionAddress();
 
         switch (nativeArgCount) {
             case 3:
@@ -988,7 +979,7 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
             default:
                 // >6 args: use HeapInvocationBuffer
                 return invokeViaBufferWithTrampoline(
-                        trampolineFunction, funcType, funcAddr, memBase, ctxPtr, wasmArgs);
+                        trampoline, funcType, funcAddr, memBase, ctxPtr, wasmArgs);
         }
     }
 
@@ -1044,8 +1035,6 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
 
         var funcType = funcTypes[funcId];
         long funcAddr = MEM.getLong(funcTableAddr + (long) funcId * 8);
-        long trampolineAddr = entryTrampolineAddrs[funcId];
-        var trampolineCallCtx = entryTrampolineCallCtxs[funcId];
 
         try {
             boolean outermostCall = callDepth++ == 0;
@@ -1084,14 +1073,12 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
 
             // nested calls run inside the outermost call's watch
             InterruptWatchdog.Registration watchdog =
-                    outermostCall ? InterruptWatchdog.enter(Thread.currentThread(), this) : null;
+                    outermostCall ? InterruptWatchdog.enter(this) : null;
             long result;
             try {
                 result =
                         invokeViaEntryTrampoline(
-                                trampolineCallCtx,
-                                trampolineAddr,
-                                entryTrampolineFunctions[funcId],
+                                entryTrampolines[funcId],
                                 funcType,
                                 funcAddr,
                                 cachedMemBase,
@@ -1121,7 +1108,6 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
             if (trapCode != 0) {
                 MEM.putInt(ctxBufferAddr + CtxBuffer.TRAP_CODE, 0);
                 if (trapCode == CtxBuffer.TRAP_INTERRUPTED) {
-                    CHECKED_MEM.putLong(ctxBufferAddr + CtxBuffer.INTERRUPT_FLAG, 0L);
                     Thread.currentThread().interrupt();
                 }
                 throw trapException(trapCode);
@@ -1152,7 +1138,6 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
             // Prevent the JIT from considering this machine unreachable during
             // the native call, which would let GC collect and close() free
             // native memory while code is executing.
-            // (ctxBuffer, funcTypesArray, code region) while code is executing.
             Reference.reachabilityFence(this);
         }
     }
@@ -1162,7 +1147,7 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
         CHECKED_MEM.putLong(ctxBufferAddr + CtxBuffer.INTERRUPT_FLAG, 1L);
     }
 
-    public void clearInterrupt() {
+    private void clearInterrupt() {
         CHECKED_MEM.putLong(ctxBufferAddr + CtxBuffer.INTERRUPT_FLAG, 0L);
     }
 
