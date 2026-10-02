@@ -15,7 +15,9 @@ public final class InterruptWatchdog {
 
     private static final Logger LOG = Logger.getLogger(InterruptWatchdog.class.getName());
 
-    private static final long POLL_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(1);
+    static final long POLL_INTERVAL_NANOS =
+            TimeUnit.MILLISECONDS.toNanos(
+                    Math.max(1, Long.getLong("endive.redline.interruptPollMillis", 100)));
 
     // how long the poller waits without calls before it exits; tests shorten it
     static final AtomicLong IDLE_EXIT_NANOS = new AtomicLong(TimeUnit.MINUTES.toNanos(1));

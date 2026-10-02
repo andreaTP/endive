@@ -37,7 +37,7 @@ public class InterruptWatchdogTest {
 
         flag.raised = false;
         // the caller is still interrupted, but no longer watched
-        long end = System.nanoTime() + MILLISECONDS.toNanos(50);
+        long end = System.nanoTime() + 3 * InterruptWatchdog.POLL_INTERVAL_NANOS;
         while (System.nanoTime() < end) {
             LockSupport.parkNanos(MILLISECONDS.toNanos(1));
         }
