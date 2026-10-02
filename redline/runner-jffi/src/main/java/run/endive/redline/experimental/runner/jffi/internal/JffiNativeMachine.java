@@ -24,6 +24,7 @@ import run.endive.redline.experimental.bridge.internal.CraneliftBridge;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Machine;
 import run.endive.runtime.TrapException;
+import run.endive.runtime.WasmInterruptedException;
 import run.endive.runtime.WasmRuntimeException;
 import run.endive.wasm.WasmEngineException;
 import run.endive.wasm.types.FunctionType;
@@ -42,7 +43,7 @@ import run.endive.wasm.types.Value;
  *   return: Wasm return value
  * </pre>
  */
-public final class JffiNativeMachine implements Machine, InterruptWatchdog.InterruptSink {
+public final class JffiNativeMachine implements Machine {
 
     private static final int CTX_SIZE = CtxBuffer.CTX_SIZE;
     private static final MemoryIO MEM = MemoryIO.getInstance();
@@ -113,6 +114,7 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
     private JffiNativeMemory nativeMemory;
     private volatile Throwable pendingException;
     private int callDepth;
+    private final InterruptWatchdog.InterruptSink interruptFlag = this::raiseInterruptFlag;
 
     // Keep closure handles alive to prevent GC
     private final Closure.Handle trampolineHandle;
@@ -931,7 +933,7 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
             return new TrapException("unaligned atomic");
         }
         if (trapCode == CtxBuffer.TRAP_INTERRUPTED) {
-            return new TrapException("interrupted");
+            return new WasmInterruptedException("Thread interrupted");
         }
         return new WasmEngineException("trap: unknown code " + trapCode);
     }
@@ -1068,12 +1070,12 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
             }
 
             if (Thread.currentThread().isInterrupted()) {
-                throw new TrapException("interrupted");
+                throw new WasmInterruptedException("Thread interrupted");
             }
 
             // nested calls run inside the outermost call's watch
             InterruptWatchdog.Registration watchdog =
-                    outermostCall ? InterruptWatchdog.enter(this) : null;
+                    outermostCall ? InterruptWatchdog.enter(interruptFlag) : null;
             long result;
             try {
                 result =
@@ -1142,8 +1144,7 @@ public final class JffiNativeMachine implements Machine, InterruptWatchdog.Inter
         }
     }
 
-    @Override
-    public void requestInterrupt() {
+    private void raiseInterruptFlag() {
         CHECKED_MEM.putLong(ctxBufferAddr + CtxBuffer.INTERRUPT_FLAG, 1L);
     }
 

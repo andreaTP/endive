@@ -21,6 +21,7 @@ import run.endive.redline.experimental.bridge.internal.CraneliftBridge;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Machine;
 import run.endive.runtime.TrapException;
+import run.endive.runtime.WasmInterruptedException;
 import run.endive.runtime.WasmRuntimeException;
 import run.endive.wasm.WasmEngineException;
 import run.endive.wasm.types.FunctionType;
@@ -41,7 +42,7 @@ import run.endive.wasm.types.Value;
  *
  * <p>See {@link CtxBuffer} for the full layout definition.
  */
-public final class NativeMachine implements Machine, InterruptWatchdog.InterruptSink {
+public final class NativeMachine implements Machine {
 
     private static final int CTX_SIZE = CtxBuffer.CTX_SIZE;
 
@@ -103,6 +104,7 @@ public final class NativeMachine implements Machine, InterruptWatchdog.Interrupt
     private NativeMemory nativeMemory;
     private volatile Throwable pendingException;
     private int callDepth;
+    private final InterruptWatchdog.InterruptSink interruptFlag = this::raiseInterruptFlag;
     private boolean ownsMemory;
     private boolean closed;
 
@@ -973,7 +975,7 @@ public final class NativeMachine implements Machine, InterruptWatchdog.Interrupt
             case CtxBuffer.TRAP_INDIRECT_CALL_TYPE_MISMATCH ->
                     new TrapException("indirect call type mismatch");
             case CtxBuffer.TRAP_UNALIGNED_ATOMIC -> new TrapException("unaligned atomic");
-            case CtxBuffer.TRAP_INTERRUPTED -> new TrapException("interrupted");
+            case CtxBuffer.TRAP_INTERRUPTED -> new WasmInterruptedException("Thread interrupted");
             default -> new WasmEngineException("trap: unknown code " + trapCode);
         };
     }
@@ -1081,12 +1083,12 @@ public final class NativeMachine implements Machine, InterruptWatchdog.Interrupt
             }
 
             if (Thread.currentThread().isInterrupted()) {
-                throw new TrapException("interrupted");
+                throw new WasmInterruptedException("Thread interrupted");
             }
 
             // nested calls run inside the outermost call's watch
             InterruptWatchdog.Registration watchdog =
-                    outermostCall ? InterruptWatchdog.enter(this) : null;
+                    outermostCall ? InterruptWatchdog.enter(interruptFlag) : null;
             long result;
             try {
                 result = (long) handle.invokeExact(cachedMemBase, ctxBuffer, args);
@@ -1148,8 +1150,7 @@ public final class NativeMachine implements Machine, InterruptWatchdog.Interrupt
         }
     }
 
-    @Override
-    public void requestInterrupt() {
+    private void raiseInterruptFlag() {
         ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.INTERRUPT_FLAG, 1L);
     }
 

@@ -5,7 +5,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -15,12 +14,12 @@ public final class InterruptWatchdog {
 
     private static final Logger LOG = Logger.getLogger(InterruptWatchdog.class.getName());
 
-    static final long POLL_INTERVAL_NANOS =
-            TimeUnit.MILLISECONDS.toNanos(
-                    Math.max(1, Long.getLong("endive.redline.interruptPollMillis", 100)));
+    private static final long POLL_INTERVAL_NANOS =
+            millisProperty("endive.redline.interruptPollMillis", 100);
 
-    // how long the poller waits without calls before it exits; tests shorten it
-    static final AtomicLong IDLE_EXIT_NANOS = new AtomicLong(TimeUnit.MINUTES.toNanos(1));
+    // how long the poller waits without calls before it exits
+    private static final long IDLE_EXIT_NANOS =
+            millisProperty("endive.redline.interruptIdleMillis", 60_000);
 
     // STATE holds the RUNNING and IDLE flags of the poller plus CALL per watched call
     private static final int RUNNING = 1;
@@ -68,17 +67,8 @@ public final class InterruptWatchdog {
         STATE.getAndAdd(-CALL);
     }
 
-    /** Visible for testing. */
-    public static int activeCount() {
-        return ACTIVE.size();
-    }
-
-    static boolean pollerRunning() {
-        return (STATE.get() & RUNNING) != 0;
-    }
-
-    static boolean pollerIdle() {
-        return (STATE.get() & IDLE) != 0;
+    private static long millisProperty(String name, long defaultMillis) {
+        return TimeUnit.MILLISECONDS.toNanos(Math.max(1, Long.getLong(name, defaultMillis)));
     }
 
     @SuppressWarnings("ThreadPriorityCheck") // not the priority of whichever caller starts it
@@ -132,7 +122,7 @@ public final class InterruptWatchdog {
         if (!STATE.compareAndSet(RUNNING, RUNNING | IDLE)) {
             return false;
         }
-        long deadline = System.nanoTime() + IDLE_EXIT_NANOS.get();
+        long deadline = System.nanoTime() + IDLE_EXIT_NANOS;
         long left;
         while ((STATE.get() & IDLE) != 0 && (left = deadline - System.nanoTime()) > 0) {
             LockSupport.parkNanos(left);
