@@ -102,8 +102,10 @@ public final class ByteArrayMemory implements Memory {
 
         if (limits.shared()) {
             waitStates = new ConcurrentHashMap<>();
+            wordLocks = new WordLocks();
         } else {
             waitStates = null;
+            wordLocks = null;
         }
     }
 
@@ -134,6 +136,7 @@ public final class ByteArrayMemory implements Memory {
     }
 
     private final Map<Integer, WaitState> waitStates;
+    private final WordLocks wordLocks;
 
     @Override
     @SuppressWarnings("removal")
@@ -146,9 +149,7 @@ public final class ByteArrayMemory implements Memory {
             // disable locking
             return new Object();
         }
-        // All atomic sizes must share a lock where they overlap, so lock the containing 8-byte
-        // word (the widest atomic access); wasm atomics are naturally aligned and never cross it
-        return waitStates.computeIfAbsent(address & ~7, k -> new WaitState());
+        return wordLocks.forAddress(address);
     }
 
     // Wait IF condition is true
