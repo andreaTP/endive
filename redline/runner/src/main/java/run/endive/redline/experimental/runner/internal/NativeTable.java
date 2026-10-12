@@ -6,7 +6,10 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.Arrays;
+import run.endive.redline.experimental.api.internal.Borrowers;
 import run.endive.redline.experimental.api.internal.CtxBuffer;
+import run.endive.redline.experimental.api.internal.NativeResource;
+import run.endive.redline.experimental.api.internal.NativeResourceCount;
 import run.endive.runtime.Instance;
 import run.endive.runtime.TableInstance;
 import run.endive.wasm.UninstantiableException;
@@ -46,13 +49,17 @@ import run.endive.wasm.types.ValType;
  * passed to {@link #setRef}, obtaining the calling module's NativeMachine.
  * This ensures cross-module shared tables resolve to the correct native addresses.
  */
-public final class NativeTable extends TableInstance {
+public final class NativeTable extends TableInstance implements NativeResource {
 
     private static final int MAX_PREALLOC = 1_000_000;
 
     private final MemorySegment buffer;
     private final int capacity;
     private final boolean isExternRef;
+    // null for a table its instance defines: that instance's arena frees it
+    private final Arena ownArena;
+    private final Borrowers borrowers = new Borrowers();
+    private boolean closed;
 
     /**
      * Owner of each entry written from Java without an owner id: one not
@@ -67,8 +74,14 @@ public final class NativeTable extends TableInstance {
     private int pruneAt = 8;
     private volatile NativeMachine lastWriter;
 
+    /** A table a module defines, allocated in its instance's arena. */
     public NativeTable(Table table, int initValue, Arena arena) {
+        this(table, initValue, arena, null);
+    }
+
+    private NativeTable(Table table, int initValue, Arena arena, Arena ownArena) {
         super(table, initValue);
+        this.ownArena = ownArena;
         this.isExternRef = table.elementType().equals(ValType.ExternRef);
         int initial = (int) table.limits().min();
         int max = (int) table.limits().max();
@@ -95,6 +108,14 @@ public final class NativeTable extends TableInstance {
                 writeUnresolvedEntry(i, initValue, null);
             }
         }
+    }
+
+    /** A table for the host to pass in as an import, freed by {@link #close()}. */
+    public static NativeTable standalone(Table table, int initValue) {
+        var arena = Arena.ofShared();
+        var nativeTable = new NativeTable(table, initValue, arena, arena);
+        NativeResourceCount.allocated();
+        return nativeTable;
     }
 
     private long entryBase(int index) {
@@ -300,6 +321,16 @@ public final class NativeTable extends TableInstance {
         throw new WasmEngineException("table entry owner " + id + " is not registered");
     }
 
+    /** Whether entries of this table may hold {@code machine}'s id. */
+    boolean hasWriter(NativeMachine machine) {
+        for (NativeMachine w : writers) {
+            if (w == machine) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Returns how many machines the table keeps for its entries. */
     int writerCount() {
         return writers.length;
@@ -349,6 +380,33 @@ public final class NativeTable extends TableInstance {
     /** Get the native address of the table buffer, for passing to native code. */
     MemorySegment nativeBuffer() {
         return buffer;
+    }
+
+    @Override
+    public Borrowers borrowers() {
+        return borrowers;
+    }
+
+    /** Frees a host table; a table a module defines is freed with its instance instead. */
+    @Override
+    public synchronized void close() {
+        if (closed) {
+            return;
+        }
+        if (!borrowers.tryClose()) {
+            throw borrowers.stillBorrowed("This table");
+        }
+        if (ownArena != null) {
+            try {
+                ownArena.close();
+            } catch (IllegalStateException e) {
+                borrowers.reopen();
+                throw e;
+            }
+            NativeResourceCount.freed();
+        }
+        closed = true;
+        borrowers.freed();
     }
 
     boolean isExternRef() {
