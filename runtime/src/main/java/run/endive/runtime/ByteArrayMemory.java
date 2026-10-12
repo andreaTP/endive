@@ -53,28 +53,13 @@ public final class ByteArrayMemory implements Memory {
     private static final boolean HAS_LONG_ATOMICS = hasFullAtomicSupport(LONG_ARR_HANDLE);
 
     // Lock-free and locked atomics don't exclude each other, so either every atomic access uses
-    // hardware atomics or every atomic access locks. Short falls back to int atomics.
+    // hardware atomics or every atomic access locks. Short RMWs fall back to int atomics.
     private static final boolean LOCK_FREE =
-            HAS_BYTE_ATOMICS && HAS_INT_ATOMICS && HAS_LONG_ATOMICS;
-
-    // Resolved once: isAccessModeSupported is expensive when the mode is unsupported, as it is
-    // for byte array views on recent JDKs (it throws and catches an error internally).
-    private static final boolean HAS_BYTE_VOLATILE_GET =
-            BYTE_ARR_HANDLE.isAccessModeSupported(AccessMode.GET_VOLATILE);
-    private static final boolean HAS_SHORT_VOLATILE_GET =
-            SHORT_ARR_HANDLE.isAccessModeSupported(AccessMode.GET_VOLATILE);
-    private static final boolean HAS_INT_VOLATILE_GET =
-            INT_ARR_HANDLE.isAccessModeSupported(AccessMode.GET_VOLATILE);
-    private static final boolean HAS_LONG_VOLATILE_GET =
-            LONG_ARR_HANDLE.isAccessModeSupported(AccessMode.GET_VOLATILE);
-    private static final boolean HAS_BYTE_VOLATILE_SET =
-            BYTE_ARR_HANDLE.isAccessModeSupported(AccessMode.SET_VOLATILE);
-    private static final boolean HAS_SHORT_VOLATILE_SET =
-            SHORT_ARR_HANDLE.isAccessModeSupported(AccessMode.SET_VOLATILE);
-    private static final boolean HAS_INT_VOLATILE_SET =
-            INT_ARR_HANDLE.isAccessModeSupported(AccessMode.SET_VOLATILE);
-    private static final boolean HAS_LONG_VOLATILE_SET =
-            LONG_ARR_HANDLE.isAccessModeSupported(AccessMode.SET_VOLATILE);
+            HAS_BYTE_ATOMICS
+                    && HAS_INT_ATOMICS
+                    && HAS_LONG_ATOMICS
+                    && SHORT_ARR_HANDLE.isAccessModeSupported(AccessMode.GET_VOLATILE)
+                    && SHORT_ARR_HANDLE.isAccessModeSupported(AccessMode.SET_VOLATILE);
 
     // Page addressing constants
     private static final int PAGE_SHIFT = 16; // PAGE_SIZE = 65536 = 2^16
@@ -115,9 +100,11 @@ public final class ByteArrayMemory implements Memory {
         }
         this.nPages = limits.initialPages();
 
-        // Also needed for non-shared memories, atomics lock on wait states when var handles
-        // don't support atomic access modes
-        waitStates = new ConcurrentHashMap<>();
+        if (limits.shared()) {
+            waitStates = new ConcurrentHashMap<>();
+        } else {
+            waitStates = null;
+        }
     }
 
     /**
@@ -155,6 +142,10 @@ public final class ByteArrayMemory implements Memory {
     }
 
     private Object wordMonitor(int address) {
+        if (!shared()) {
+            // disable locking
+            return new Object();
+        }
         // All atomic sizes must share a lock where they overlap, so lock the containing 8-byte
         // word (the widest atomic access); wasm atomics are naturally aligned and never cross it
         return waitStates.computeIfAbsent(address & ~7, k -> new WaitState());
@@ -1091,7 +1082,7 @@ public final class ByteArrayMemory implements Memory {
         try {
             byte[] page = pages[addr >>> PAGE_SHIFT];
             int off = addr & PAGE_MASK;
-            if (LOCK_FREE && HAS_BYTE_VOLATILE_GET) {
+            if (LOCK_FREE) {
                 return (byte) BYTE_ARR_HANDLE.getVolatile(page, off);
             }
             synchronized (wordMonitor(addr)) {
@@ -1107,7 +1098,7 @@ public final class ByteArrayMemory implements Memory {
         try {
             byte[] page = pages[addr >>> PAGE_SHIFT];
             int off = addr & PAGE_MASK;
-            if (LOCK_FREE && HAS_INT_VOLATILE_GET) {
+            if (LOCK_FREE) {
                 return (int) INT_ARR_HANDLE.getVolatile(page, off);
             }
             synchronized (wordMonitor(addr)) {
@@ -1123,7 +1114,7 @@ public final class ByteArrayMemory implements Memory {
         try {
             byte[] page = pages[addr >>> PAGE_SHIFT];
             int off = addr & PAGE_MASK;
-            if (LOCK_FREE && HAS_LONG_VOLATILE_GET) {
+            if (LOCK_FREE) {
                 return (long) LONG_ARR_HANDLE.getVolatile(page, off);
             }
             synchronized (wordMonitor(addr)) {
@@ -1139,7 +1130,7 @@ public final class ByteArrayMemory implements Memory {
         try {
             byte[] page = pages[addr >>> PAGE_SHIFT];
             int off = addr & PAGE_MASK;
-            if (LOCK_FREE && HAS_SHORT_VOLATILE_GET) {
+            if (LOCK_FREE) {
                 return (short) SHORT_ARR_HANDLE.getVolatile(page, off);
             }
             synchronized (wordMonitor(addr)) {
@@ -1155,7 +1146,7 @@ public final class ByteArrayMemory implements Memory {
         try {
             byte[] page = pages[addr >>> PAGE_SHIFT];
             int off = addr & PAGE_MASK;
-            if (LOCK_FREE && HAS_BYTE_VOLATILE_SET) {
+            if (LOCK_FREE) {
                 BYTE_ARR_HANDLE.setVolatile(page, off, value);
                 return;
             }
@@ -1172,7 +1163,7 @@ public final class ByteArrayMemory implements Memory {
         try {
             byte[] page = pages[addr >>> PAGE_SHIFT];
             int off = addr & PAGE_MASK;
-            if (LOCK_FREE && HAS_INT_VOLATILE_SET) {
+            if (LOCK_FREE) {
                 INT_ARR_HANDLE.setVolatile(page, off, value);
                 return;
             }
@@ -1189,7 +1180,7 @@ public final class ByteArrayMemory implements Memory {
         try {
             byte[] page = pages[addr >>> PAGE_SHIFT];
             int off = addr & PAGE_MASK;
-            if (LOCK_FREE && HAS_LONG_VOLATILE_SET) {
+            if (LOCK_FREE) {
                 LONG_ARR_HANDLE.setVolatile(page, off, value);
                 return;
             }
@@ -1206,7 +1197,7 @@ public final class ByteArrayMemory implements Memory {
         try {
             byte[] page = pages[addr >>> PAGE_SHIFT];
             int off = addr & PAGE_MASK;
-            if (LOCK_FREE && HAS_SHORT_VOLATILE_SET) {
+            if (LOCK_FREE) {
                 SHORT_ARR_HANDLE.setVolatile(page, off, value);
                 return;
             }

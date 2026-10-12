@@ -55,8 +55,11 @@ public final class ByteBufferMemory implements Memory {
         }
         this.nPages = limits.initialPages();
 
-        // Also needed for non-shared memories, atomics lock on wait states
-        waitStates = new ConcurrentHashMap<>();
+        if (limits.shared()) {
+            waitStates = new ConcurrentHashMap<>();
+        } else {
+            waitStates = null;
+        }
     }
 
     /**
@@ -90,6 +93,10 @@ public final class ByteBufferMemory implements Memory {
     @Override
     @SuppressWarnings("removal")
     public Object lock(int address) {
+        if (!shared()) {
+            // disable locking
+            return new Object();
+        }
         return waitStates.computeIfAbsent(address, k -> new WaitState());
     }
 
@@ -149,13 +156,13 @@ public final class ByteBufferMemory implements Memory {
     @Override
     @SuppressWarnings("removal")
     public int waitOn(int address, int expected, long timeout) {
-        return waitOn(address, () -> readInt(address) == expected, timeout);
+        return waitOn(address, () -> atomicReadInt(address) == expected, timeout);
     }
 
     @Override
     @SuppressWarnings("removal")
     public int waitOn(int address, long expected, long timeout) {
-        return waitOn(address, () -> readLong(address) == expected, timeout);
+        return waitOn(address, () -> atomicReadLong(address) == expected, timeout);
     }
 
     // Notify waiters at this address
