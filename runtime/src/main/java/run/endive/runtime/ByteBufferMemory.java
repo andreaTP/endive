@@ -57,10 +57,8 @@ public final class ByteBufferMemory implements Memory {
 
         if (limits.shared()) {
             waitStates = new ConcurrentHashMap<>();
-            wordLocks = new WordLocks();
         } else {
             waitStates = null;
-            wordLocks = null;
         }
     }
 
@@ -91,15 +89,11 @@ public final class ByteBufferMemory implements Memory {
     }
 
     private final Map<Integer, WaitState> waitStates;
-    private final WordLocks wordLocks;
+    private final WordLocks wordLocks = new WordLocks();
 
     @Override
     @SuppressWarnings("removal")
     public Object lock(int address) {
-        if (!shared()) {
-            // disable locking
-            return new Object();
-        }
         return wordLocks.forAddress(address);
     }
 

@@ -52,8 +52,7 @@ public final class ByteArrayMemory implements Memory {
     private static final boolean HAS_INT_ATOMICS = hasFullAtomicSupport(INT_ARR_HANDLE);
     private static final boolean HAS_LONG_ATOMICS = hasFullAtomicSupport(LONG_ARR_HANDLE);
 
-    // Lock-free and locked atomics don't exclude each other, so either every atomic access uses
-    // hardware atomics or every atomic access locks. Short RMWs fall back to int atomics.
+    // All atomics lock-free or all locked: the two don't exclude each other
     private static final boolean LOCK_FREE =
             HAS_BYTE_ATOMICS
                     && HAS_INT_ATOMICS
@@ -102,10 +101,8 @@ public final class ByteArrayMemory implements Memory {
 
         if (limits.shared()) {
             waitStates = new ConcurrentHashMap<>();
-            wordLocks = new WordLocks();
         } else {
             waitStates = null;
-            wordLocks = null;
         }
     }
 
@@ -136,7 +133,7 @@ public final class ByteArrayMemory implements Memory {
     }
 
     private final Map<Integer, WaitState> waitStates;
-    private final WordLocks wordLocks;
+    private final WordLocks wordLocks = new WordLocks();
 
     @Override
     @SuppressWarnings("removal")
@@ -145,10 +142,6 @@ public final class ByteArrayMemory implements Memory {
     }
 
     private Object wordMonitor(int address) {
-        if (!shared()) {
-            // disable locking
-            return new Object();
-        }
         return wordLocks.forAddress(address);
     }
 

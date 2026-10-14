@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -248,6 +249,63 @@ public class MemoryTest {
         memory.atomicWriteByte(18, (byte) 5);
         assertEquals((byte) 5, memory.atomicOrByte(18, (byte) 2));
         assertEquals((byte) 7, memory.atomicReadByte(18));
+    }
+
+    // e.g. the host updating a non-shared memory from another thread
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("memoryImplementations")
+    public void concurrentAtomicsOnNonSharedMemory(String name, Supplier<Memory> memorySupplier)
+            throws Exception {
+        final int iterations = 20_000;
+        var memory = memorySupplier.get();
+
+        var start = new CountDownLatch(1);
+        Runnable adds =
+                () -> {
+                    awaitQuietly(start);
+                    for (int i = 0; i < iterations; i++) {
+                        memory.atomicAddInt(0, 1);
+                    }
+                };
+        var first = CompletableFuture.runAsync(adds);
+        var second = CompletableFuture.runAsync(adds);
+        start.countDown();
+        CompletableFuture.allOf(first, second).get(30, TimeUnit.SECONDS);
+
+        assertEquals(2 * iterations, memory.atomicReadInt(0));
+    }
+
+    // A waiter reads its value under the word lock, so mix wait/notify with atomics on that word
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("growableMemoryImplementations")
+    public void waitAndNotifyWithAtomicsOnSameWord(String name, Supplier<Memory> memorySupplier)
+            throws Exception {
+        final int addr = 4;
+        var memory = memorySupplier.get();
+        memory.atomicWriteInt(addr, 0);
+
+        var stop = new AtomicBoolean();
+        var adds =
+                CompletableFuture.runAsync(
+                        () -> {
+                            while (!stop.get()) {
+                                memory.atomicAddInt(0, 1);
+                            }
+                        });
+        try {
+            for (int round = 0; round < 100; round++) {
+                var waiter =
+                        CompletableFuture.supplyAsync(
+                                () -> memory.atomicWait(addr, 0, TimeUnit.SECONDS.toNanos(30)));
+                while (memory.atomicNotify(addr, 1) == 0 && !waiter.isDone()) {
+                    Thread.onSpinWait();
+                }
+                assertEquals(0, waiter.get(30, TimeUnit.SECONDS), "round " + round);
+            }
+        } finally {
+            stop.set(true);
+        }
+        adds.get(30, TimeUnit.SECONDS);
     }
 
     /**
