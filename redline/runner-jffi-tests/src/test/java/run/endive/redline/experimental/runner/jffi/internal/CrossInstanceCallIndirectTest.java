@@ -1,5 +1,6 @@
 package run.endive.redline.experimental.runner.jffi.internal;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -154,6 +155,39 @@ public class CrossInstanceCallIndirectTest {
     public void multiValueResultsReachTheCaller() {
         try (var linked = linkNative()) {
             assertEquals(42 - 1000, (int) linked.caller.export("callPair").apply()[0]);
+        }
+    }
+
+    /** A host function may return no results, which the import path already tolerates. */
+    @Test
+    public void multiValueHostFunctionReturningNull() {
+        var none =
+                new HostFunction(
+                        "host",
+                        "none",
+                        FunctionType.of(List.of(), List.of(ValType.I32, ValType.I32)),
+                        (inst, args) -> null);
+        var store = new Store().addFunction(none);
+        try (var owner =
+                nativeInstance(
+                        "(module\n"
+                                + "  (import \"host\" \"none\" (func $none (result i32 i32)))\n"
+                                + "  (table (export \"tab\") 1 funcref)\n"
+                                + "  (elem (i32.const 0) $none))\n",
+                        store)) {
+            store.register("owner", owner);
+            try (var caller =
+                    nativeInstance(
+                            "(module\n"
+                                    + "  (type $pair (func (result i32 i32)))\n"
+                                    + "  (import \"owner\" \"tab\" (table 1 funcref))\n"
+                                    + "  (func (export \"call\")\n"
+                                    + "    (call_indirect (type $pair) (i32.const 0))\n"
+                                    + "    drop\n"
+                                    + "    drop))\n",
+                            store)) {
+                assertDoesNotThrow(() -> caller.export("call").apply());
+            }
         }
     }
 

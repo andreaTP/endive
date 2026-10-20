@@ -691,13 +691,16 @@ public final class JffiNativeMachine implements Machine {
                                 .callWithStackLimit(funcId, args, stackLimit)
                         : ownerMachine.call(funcId, args);
         refreshMemoryPages();
+        if (results == null || results.length == 0) {
+            return 0L;
+        }
         if (expected.returns().size() > 1) {
             for (int i = 0; i < results.length; i++) {
                 MEM.putLong(argsBufferAddr + CtxBuffer.argOffset(i), results[i]);
             }
             return 0L;
         }
-        return results == null || results.length == 0 ? 0L : results[0];
+        return results[0];
     }
 
     private long handleTableOperation(int opCode) {
