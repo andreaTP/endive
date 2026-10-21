@@ -120,7 +120,13 @@ public class Instance implements AutoCloseable {
         this.types = types.clone();
         this.functionTypes = functionTypes.clone();
         this.imports = imports;
-        this.machine = machineFactory.apply(this);
+        try {
+            this.machine = machineFactory.apply(this);
+        } catch (RuntimeException | Error e) {
+            // no machine took them over
+            closeMemories(memories, e);
+            throw e;
+        }
         try {
             this.tables = new TableInstance[tables.length];
             this.elements = elements.clone();
@@ -167,6 +173,20 @@ public class Instance implements AutoCloseable {
                 e.addSuppressed(suppressed);
             }
             throw e;
+        }
+    }
+
+    /** Closes the memories built for an instance that failed to build, as some hold native memory. */
+    @SuppressWarnings("checkstyle:IllegalCatch")
+    private static void closeMemories(Memory[] memories, Throwable failure) {
+        for (var memory : memories) {
+            if (memory instanceof AutoCloseable) {
+                try {
+                    ((AutoCloseable) memory).close();
+                } catch (Exception e) {
+                    failure.addSuppressed(e);
+                }
+            }
         }
     }
 
@@ -1167,24 +1187,6 @@ public class Instance implements AutoCloseable {
 
             Element[] elements = module.elementSection().elements();
 
-            Memory[] memories = new Memory[0];
-            if (module.memorySection().isPresent()) {
-                var memSection = module.memorySection().get();
-                memories = new Memory[memSection.memoryCount()];
-                for (int i = 0; i < memSection.memoryCount(); i++) {
-                    var limits = memSection.getMemory(i).limits();
-                    if (i == 0) {
-                        memories[i] =
-                                requireNonNullElse(memoryFactory, ByteBufferMemory::new)
-                                        .apply(requireNonNullElse(memoryLimits, limits));
-                    } else {
-                        memories[i] =
-                                requireNonNullElse(memoryFactory, ByteBufferMemory::new)
-                                        .apply(limits);
-                    }
-                }
-            }
-
             for (var e : exports.values()) {
                 switch (e.exportType()) {
                     case FUNCTION:
@@ -1225,6 +1227,25 @@ public class Instance implements AutoCloseable {
                             }
                             break;
                         }
+                }
+            }
+
+            // after validation, which would leave a native memory allocated if it failed
+            Memory[] memories = new Memory[0];
+            if (module.memorySection().isPresent()) {
+                var memSection = module.memorySection().get();
+                memories = new Memory[memSection.memoryCount()];
+                for (int i = 0; i < memSection.memoryCount(); i++) {
+                    var limits = memSection.getMemory(i).limits();
+                    if (i == 0) {
+                        memories[i] =
+                                requireNonNullElse(memoryFactory, ByteBufferMemory::new)
+                                        .apply(requireNonNullElse(memoryLimits, limits));
+                    } else {
+                        memories[i] =
+                                requireNonNullElse(memoryFactory, ByteBufferMemory::new)
+                                        .apply(limits);
+                    }
                 }
             }
 

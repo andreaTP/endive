@@ -140,7 +140,6 @@ holds stays allocated until the JVM exits. Use try-with-resources, as above.
   running, for example when a host function tries to close the instance that called it.
 - An instance whose memory or tables another open instance imports can't be closed until that
   instance is. Close importers first.
-- If building an instance fails, what it had allocated may leak.
 
 ## Falling back
 

@@ -3,6 +3,7 @@ package run.endive.redline.experimental.api;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Supplier;
 import run.endive.redline.experimental.api.internal.Borrowers;
 import run.endive.redline.experimental.api.internal.NativeResource;
 import run.endive.runtime.ByteBufferMemory;
@@ -60,14 +61,14 @@ public final class ImportFactory implements AutoCloseable {
 
     public Memory memory(MemoryLimits limits) {
         if (provider != null) {
-            return own(provider.createMemory(limits));
+            return own(() -> provider.createMemory(limits));
         }
         return new ByteBufferMemory(limits);
     }
 
     public TableInstance table(Table table, int initValue) {
         if (provider != null) {
-            return own(provider.createImportTable(table, initValue));
+            return own(() -> provider.createImportTable(table, initValue));
         }
         return new TableInstance(table, initValue);
     }
@@ -79,10 +80,11 @@ public final class ImportFactory implements AutoCloseable {
         return GlobalInstance.builder().value(value).mutabilityType(mutability).build();
     }
 
-    private synchronized <T> T own(T resource) {
+    private synchronized <T> T own(Supplier<T> create) {
         if (closed) {
             throw new IllegalStateException("This import factory has been closed");
         }
+        T resource = create.get();
         if (resource instanceof NativeResource) {
             created.add((NativeResource) resource);
         }

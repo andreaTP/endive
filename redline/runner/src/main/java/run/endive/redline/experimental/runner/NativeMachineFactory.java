@@ -58,8 +58,15 @@ public final class NativeMachineFactory {
     }
 
     public Machine compile(Instance instance) {
-        this.instanceArena = Arena.ofShared();
-        return new NativeMachine(instance, instanceArena, precompiledCode);
+        var arena = Arena.ofShared();
+        try {
+            this.instanceArena = arena;
+            return new NativeMachine(instance, arena, precompiledCode);
+        } catch (RuntimeException | Error e) {
+            // frees what the machine allocated before it failed
+            arena.close();
+            throw e;
+        }
     }
 
     public static final class Builder {

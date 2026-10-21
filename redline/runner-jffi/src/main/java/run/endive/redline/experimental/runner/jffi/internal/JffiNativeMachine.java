@@ -131,11 +131,27 @@ public final class JffiNativeMachine implements Machine {
     private final Closure.Handle[] importHandles;
 
     // native frees, run newest first at close
-    private final ArrayDeque<Runnable> frees = new ArrayDeque<>();
+    private final ArrayDeque<Runnable> frees;
     private final List<NativeResource> borrowed = new ArrayList<>();
     private final List<JffiNativeGlobalInstance> boundGlobals = new ArrayList<>();
 
-    public JffiNativeMachine(Instance instance, NativeCode precompiledCode) {
+    /** Builds the machine, freeing what it allocated if that fails. */
+    public static JffiNativeMachine create(Instance instance, NativeCode precompiledCode) {
+        var frees = new ArrayDeque<Runnable>();
+        try {
+            return new JffiNativeMachine(instance, precompiledCode, frees);
+        } catch (RuntimeException | Error e) {
+            var failure = runFrees(frees, null);
+            if (failure != null) {
+                e.addSuppressed(failure);
+            }
+            throw e;
+        }
+    }
+
+    private JffiNativeMachine(
+            Instance instance, NativeCode precompiledCode, ArrayDeque<Runnable> frees) {
+        this.frees = frees;
         this.instance = instance;
         var module = instance.module();
         NativeCode code = NativeCodeCheck.check(precompiledCode, module);
@@ -308,7 +324,7 @@ public final class JffiNativeMachine implements Machine {
     }
 
     // Runs every free, newest first, even when one of them fails.
-    private RuntimeException runFrees(RuntimeException failure) {
+    private static RuntimeException runFrees(ArrayDeque<Runnable> frees, RuntimeException failure) {
         while (!frees.isEmpty()) {
             try {
                 frees.pop().run();
@@ -427,7 +443,7 @@ public final class JffiNativeMachine implements Machine {
                 failure = addFailure(failure, e);
             }
         }
-        failure = runFrees(failure);
+        failure = runFrees(frees, failure);
         NativeResourceCount.freed();
         if (failure != null) {
             throw failure;

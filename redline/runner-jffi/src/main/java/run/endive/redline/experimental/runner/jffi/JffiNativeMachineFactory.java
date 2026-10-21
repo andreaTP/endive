@@ -54,7 +54,7 @@ public final class JffiNativeMachineFactory {
     }
 
     public Machine compile(Instance instance) {
-        return new JffiNativeMachine(instance, precompiledCode);
+        return JffiNativeMachine.create(instance, precompiledCode);
     }
 
     public static final class Builder {

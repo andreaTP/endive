@@ -245,6 +245,16 @@ public class LifecycleTest {
         assertEquals(before, NativeResourceCount.live());
     }
 
+    @Test
+    public void aBuildThatFailsBeforeItsMachineFreesItsMemory() {
+        int before = NativeResourceCount.live();
+        var withMemory = parse("trap-stops-execution");
+        var otherModulesCode = compile(parse("big-table"));
+
+        assertThrows(WasmEngineException.class, () -> build(withMemory, otherModulesCode));
+        assertEquals(before, NativeResourceCount.live());
+    }
+
     private static WasmModule parse(String name) {
         return Parser.parse(CorpusResources.getResource("compiled/" + name + ".wat.wasm"));
     }
