@@ -954,39 +954,43 @@ public final class NativeMachine implements Machine {
         if (tablesInitialized) {
             return;
         }
-        tablesInitialized = true;
 
         var module = instance.module();
         int importedTableCount = instance.imports().tableCount();
         int definedTableCount = module.tableSection().tableCount();
         int tableCount = importedTableCount + definedTableCount;
 
-        if (tableCount == 0) {
-            this.nativeTables = new NativeTable[0];
-            return;
-        }
-
-        // Instance.table(i) returns NativeTable (created by tableFactory).
-        // Just collect references and build the pointer array.
-        this.nativeTables = new NativeTable[tableCount];
-        this.tablePtrsArray = arena.allocate((long) tableCount * 8, 8);
-        this.tableWriters = arena.allocate((long) tableCount * 4, 4).fill((byte) 0);
-
+        // checked first, so a call that fails here leaves nothing half set up for the next
+        var tables = new NativeTable[tableCount];
         for (int i = 0; i < tableCount; i++) {
             var table = instance.table(i);
-            if (table instanceof NativeTable nt) {
-                nt.resolvePendingRefs(instance);
-                nativeTables[i] = nt;
-            } else {
+            if (!(table instanceof NativeTable nt)) {
                 throw new WasmEngineException(foreignImportMessage("table", table));
             }
-
-            tablePtrsArray.set(
-                    ValueLayout.JAVA_LONG, (long) i * 8, nativeTables[i].nativeBuffer().address());
+            tables[i] = nt;
         }
 
-        ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.TABLE_PTRS, tablePtrsArray.address());
-        ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.TABLE_WRITERS_PTR, tableWriters.address());
+        if (tableCount > 0 && tablePtrsArray.byteSize() == 0) {
+            this.tablePtrsArray = arena.allocate((long) tableCount * 8, 8);
+            this.tableWriters = arena.allocate((long) tableCount * 4, 4).fill((byte) 0);
+        }
+        for (int i = 0; i < tableCount; i++) {
+            tables[i].resolvePendingRefs(instance);
+            tablePtrsArray.set(
+                    ValueLayout.JAVA_LONG, (long) i * 8, tables[i].nativeBuffer().address());
+        }
+        this.nativeTables = tables;
+        if (tableCount > 0) {
+            ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.TABLE_PTRS, tablePtrsArray.address());
+            ctxBuffer.set(
+                    ValueLayout.JAVA_LONG, CtxBuffer.TABLE_WRITERS_PTR, tableWriters.address());
+        }
+        tablesInitialized = true;
+    }
+
+    /** Returns how many functions, imported and defined, this machine's function table holds. */
+    int functionCount() {
+        return (int) (funcTable.byteSize() / 8);
     }
 
     /** Package-private: used by NativeTable to resolve funcId → funcPtr across modules. */

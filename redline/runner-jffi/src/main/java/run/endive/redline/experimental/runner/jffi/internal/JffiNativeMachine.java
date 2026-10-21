@@ -931,37 +931,41 @@ public final class JffiNativeMachine implements Machine {
         if (tablesInitialized) {
             return;
         }
-        tablesInitialized = true;
 
         var module = instance.module();
         int importedTableCount = instance.imports().tableCount();
         int definedTableCount = module.tableSection().tableCount();
         int tableCount = importedTableCount + definedTableCount;
 
-        if (tableCount == 0) {
-            this.nativeTables = new JffiNativeTable[0];
-            return;
-        }
-
-        this.nativeTables = new JffiNativeTable[tableCount];
-        this.tablePtrsArrayAddr = allocate((long) tableCount * 8);
-        this.tableWritersAddr = allocate((long) tableCount * 4);
-
+        // checked first, so a call that fails here leaves nothing half set up for the next
+        var tables = new JffiNativeTable[tableCount];
         for (int i = 0; i < tableCount; i++) {
             var table = instance.table(i);
-            if (table instanceof JffiNativeTable) {
-                var nt = (JffiNativeTable) table;
-                nt.resolvePendingRefs(instance);
-                nativeTables[i] = nt;
-            } else {
+            if (!(table instanceof JffiNativeTable)) {
                 throw new WasmEngineException(foreignImportMessage("table", table));
             }
-
-            MEM.putLong(tablePtrsArrayAddr + (long) i * 8, nativeTables[i].nativeBufferAddress());
+            tables[i] = (JffiNativeTable) table;
         }
 
-        MEM.putLong(ctxBufferAddr + CtxBuffer.TABLE_PTRS, tablePtrsArrayAddr);
-        MEM.putLong(ctxBufferAddr + CtxBuffer.TABLE_WRITERS_PTR, tableWritersAddr);
+        if (tableCount > 0 && tablePtrsArrayAddr == 0) {
+            this.tablePtrsArrayAddr = allocate((long) tableCount * 8);
+            this.tableWritersAddr = allocate((long) tableCount * 4);
+        }
+        for (int i = 0; i < tableCount; i++) {
+            tables[i].resolvePendingRefs(instance);
+            MEM.putLong(tablePtrsArrayAddr + (long) i * 8, tables[i].nativeBufferAddress());
+        }
+        this.nativeTables = tables;
+        if (tableCount > 0) {
+            MEM.putLong(ctxBufferAddr + CtxBuffer.TABLE_PTRS, tablePtrsArrayAddr);
+            MEM.putLong(ctxBufferAddr + CtxBuffer.TABLE_WRITERS_PTR, tableWritersAddr);
+        }
+        tablesInitialized = true;
+    }
+
+    /** Returns how many functions, imported and defined, this machine's function table holds. */
+    int functionCount() {
+        return (int) (funcTableSize / 8);
     }
 
     /** Package-private: used by JffiNativeTable to resolve funcId → funcPtr. */

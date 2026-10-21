@@ -12,6 +12,7 @@ import run.endive.redline.experimental.api.internal.NativeResource;
 import run.endive.redline.experimental.api.internal.NativeResourceCount;
 import run.endive.runtime.Instance;
 import run.endive.runtime.TableInstance;
+import run.endive.runtime.TrapException;
 import run.endive.wasm.UninstantiableException;
 import run.endive.wasm.WasmEngineException;
 import run.endive.wasm.types.Table;
@@ -93,7 +94,11 @@ public final class NativeTable extends TableInstance implements NativeResource {
 
         // Write header
         buffer.set(ValueLayout.JAVA_INT, CtxBuffer.TABLE_SIZE_OFFSET, initial);
-        buffer.set(ValueLayout.JAVA_INT, CtxBuffer.TABLE_MAX_OFFSET, max > 0 ? max : capacity);
+        // compiled table.grow checks only this, so it must not exceed the buffer
+        buffer.set(
+                ValueLayout.JAVA_INT,
+                CtxBuffer.TABLE_MAX_OFFSET,
+                max > 0 ? Math.min(max, capacity) : capacity);
 
         // Only the entries below size are reachable: every access bounds-checks
         // against the size field, and grow fills the slots it exposes. Filling
@@ -187,6 +192,10 @@ public final class NativeTable extends TableInstance implements NativeResource {
      * @param owner the open native machine that defines the function
      */
     private void writeResolvedEntry(int index, int funcId, NativeMachine owner) {
+        if (funcId < 0 || funcId >= owner.functionCount()) {
+            // a funcref from another instance can carry an id outside this one's functions
+            throw new TrapException("undefined element");
+        }
         long funcPtr = owner.getFuncTable().get(ValueLayout.JAVA_LONG, (long) funcId * 8);
         if (funcPtr == 0L) {
             // Not compiled, so only the owner's runner can report it
@@ -457,11 +466,11 @@ public final class NativeTable extends TableInstance implements NativeResource {
     @Override
     public int grow(int delta, int value, Instance instance) {
         int oldSize = size();
-        int newSize = oldSize + delta;
         int max = buffer.get(ValueLayout.JAVA_INT, CtxBuffer.TABLE_MAX_OFFSET);
-        if (delta < 0 || newSize > max || newSize > capacity) {
+        if (delta < 0 || delta > Math.min(max, capacity) - oldSize) {
             return -1;
         }
+        int newSize = oldSize + delta;
         fill(oldSize, newSize, value, instance);
         // Update size
         buffer.set(ValueLayout.JAVA_INT, CtxBuffer.TABLE_SIZE_OFFSET, newSize);
