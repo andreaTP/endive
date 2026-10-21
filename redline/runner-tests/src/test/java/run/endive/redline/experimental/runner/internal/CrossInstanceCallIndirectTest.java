@@ -290,6 +290,45 @@ public class CrossInstanceCallIndirectTest {
         }
     }
 
+    /** A call through a function import reaches the callee via the host, and shares the budget too. */
+    @Test
+    public void importedFunctionSharesTheCallersStackBudget() {
+        var store = new Store();
+        try (var owner =
+                nativeInstance(
+                        """
+                        (module
+                          (global (export "depth") (mut i32) (i32.const 0))
+                          (func $recurse (export "recurse") (result i32)
+                            (global.set 0 (i32.add (global.get 0) (i32.const 1)))
+                            (call $recurse)))
+                        """,
+                        store)) {
+            store.register("owner", owner);
+            try (var caller =
+                    nativeInstance(
+                            """
+                            (module
+                              (import "owner" "recurse" (func $recurse (result i32)))
+                              (global (export "depth") (mut i32) (i32.const 0))
+                              (func $descend (export "descend") (param i32) (result i32)
+                                (global.set 0 (i32.add (global.get 0) (i32.const 1)))
+                                (if (result i32) (local.get 0)
+                                  (then
+                                    (call $descend (i32.sub (local.get 0) (i32.const 1))))
+                                  (else (call $recurse)))))
+                            """,
+                            store)) {
+                int callerBudget = depthReached(caller, -1, caller);
+                int fromTheTop = depthReached(caller, 0, owner);
+                int fromHalfway = depthReached(caller, callerBudget / 2, owner);
+                assertTrue(
+                        fromHalfway < fromTheTop * 3 / 4,
+                        fromHalfway + " levels from halfway, " + fromTheTop + " from the top");
+            }
+        }
+    }
+
     @Test
     public void signatureIsCheckedByStructure() {
         try (var linked = linkNative()) {

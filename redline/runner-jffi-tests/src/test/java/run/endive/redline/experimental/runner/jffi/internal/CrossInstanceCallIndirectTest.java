@@ -269,6 +269,41 @@ public class CrossInstanceCallIndirectTest {
         }
     }
 
+    /** A call through a function import reaches the callee via the host, and shares the budget too. */
+    @Test
+    public void importedFunctionSharesTheCallersStackBudget() {
+        var store = new Store();
+        try (var owner =
+                nativeInstance(
+                        "(module\n"
+                                + "  (global (export \"depth\") (mut i32) (i32.const 0))\n"
+                                + "  (func $recurse (export \"recurse\") (result i32)\n"
+                                + "    (global.set 0 (i32.add (global.get 0) (i32.const 1)))\n"
+                                + "    (call $recurse)))\n",
+                        store)) {
+            store.register("owner", owner);
+            try (var caller =
+                    nativeInstance(
+                            "(module\n"
+                                + "  (import \"owner\" \"recurse\" (func $recurse (result i32)))\n"
+                                + "  (global (export \"depth\") (mut i32) (i32.const 0))\n"
+                                + "  (func $descend (export \"descend\") (param i32) (result i32)\n"
+                                + "    (global.set 0 (i32.add (global.get 0) (i32.const 1)))\n"
+                                + "    (if (result i32) (local.get 0)\n"
+                                + "      (then\n"
+                                + "        (call $descend (i32.sub (local.get 0) (i32.const 1))))\n"
+                                + "      (else (call $recurse)))))\n",
+                            store)) {
+                int callerBudget = depthReached(caller, -1, caller);
+                int fromTheTop = depthReached(caller, 0, owner);
+                int fromHalfway = depthReached(caller, callerBudget / 2, owner);
+                assertTrue(
+                        fromHalfway < fromTheTop * 3 / 4,
+                        fromHalfway + " levels from halfway, " + fromTheTop + " from the top");
+            }
+        }
+    }
+
     @Test
     public void signatureIsCheckedByStructure() {
         try (var linked = linkNative()) {
