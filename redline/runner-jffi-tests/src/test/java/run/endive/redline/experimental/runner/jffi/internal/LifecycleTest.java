@@ -1,9 +1,13 @@
 package run.endive.redline.experimental.runner.jffi.internal;
 
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import org.junit.jupiter.api.Test;
 import run.endive.corpus.CorpusResources;
 import run.endive.redline.experimental.api.ImportFactory;
@@ -113,6 +117,42 @@ public class LifecycleTest {
         assertEquals(0, instance.memory().readInt(0), "nothing was freed");
         instance.close();
         assertThrows(WasmEngineException.class, () -> instance.export("callBoom").apply());
+    }
+
+    @Test
+    public void closingWhileAnotherThreadIsInACallIsRefused() throws InterruptedException {
+        var running = new CountDownLatch(1);
+        var noParams = FunctionType.of(List.of(), List.of());
+        var imports =
+                ImportValues.builder()
+                        .addFunction(
+                                new HostFunction("host", "reenter", noParams, (inst, args) -> null))
+                        .addFunction(
+                                new HostFunction(
+                                        "host", "raiseFlag", noParams, (inst, args) -> null))
+                        .addFunction(
+                                new HostFunction(
+                                        "host",
+                                        "tick",
+                                        noParams,
+                                        (inst, args) -> {
+                                            running.countDown();
+                                            return null;
+                                        }))
+                        .build();
+        var instance = build(parse("reentrant-interrupt"), imports);
+        var caller = new Thread(() -> instance.export("spin").apply());
+        caller.setDaemon(true);
+        caller.setUncaughtExceptionHandler((t, e) -> {});
+        caller.start();
+        assertTrue(running.await(10, SECONDS), "the call never started");
+
+        assertThrows(IllegalStateException.class, instance::close);
+
+        caller.interrupt();
+        caller.join(SECONDS.toMillis(10));
+        assertFalse(caller.isAlive(), "the call was not interrupted");
+        instance.close();
     }
 
     @Test

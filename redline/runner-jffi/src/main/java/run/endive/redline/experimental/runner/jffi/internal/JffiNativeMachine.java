@@ -17,6 +17,7 @@ import java.nio.ByteOrder;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import run.endive.redline.experimental.api.NativeCode;
 import run.endive.redline.experimental.api.internal.Borrowers;
@@ -122,7 +123,10 @@ public final class JffiNativeMachine implements Machine {
     private boolean memBaseInitialized;
     private JffiNativeMemory nativeMemory;
     private volatile Throwable pendingException;
-    private int callDepth;
+    // calls under way on any thread, which close() refuses to run under
+    private final AtomicInteger callDepth = new AtomicInteger();
+    // set by close() before it looks at callDepth, and kept once it succeeds
+    private volatile boolean closing;
     private final InterruptWatchdog.InterruptSink interruptFlag = this::raiseInterruptFlag;
 
     // Keep closure handles alive to prevent GC
@@ -423,13 +427,19 @@ public final class JffiNativeMachine implements Machine {
         if (closed) {
             return;
         }
-        if (callDepth > 0) {
-            throw new IllegalStateException(
-                    "Cannot close an instance while one of its calls is running");
-        }
+        closing = true;
         var owned = ownedResources();
-        // refuses, changing nothing, while another instance still imports one of them
-        Borrowers.tryCloseAll(owned);
+        try {
+            if (callDepth.get() > 0) {
+                throw new IllegalStateException(
+                        "Cannot close an instance while one of its calls is running");
+            }
+            // refuses, changing nothing, while another instance still imports one of them
+            Borrowers.tryCloseAll(owned);
+        } catch (RuntimeException | Error e) {
+            closing = false;
+            throw e;
+        }
         closed = true;
         for (var global : boundGlobals) {
             global.detach();
@@ -1112,13 +1122,13 @@ public final class JffiNativeMachine implements Machine {
         }
 
         var funcType = funcTypes[funcId];
-        long funcAddr = MEM.getLong(funcTableAddr + (long) funcId * 8);
         if (entryTrampolines[funcId] == null) {
             throw new WasmEngineException("Function " + funcId + " not compiled");
         }
 
+        boolean outermostCall = enterCall();
         try {
-            boolean outermostCall = callDepth++ == 0;
+            long funcAddr = MEM.getLong(funcTableAddr + (long) funcId * 8);
             initializeImportGlobals();
             initializeNativeTables();
 
@@ -1214,11 +1224,32 @@ public final class JffiNativeMachine implements Machine {
             sneakyThrow(e);
             throw new AssertionError("unreachable");
         } finally {
-            callDepth--;
+            callDepth.decrementAndGet();
             // Prevent the JIT from considering this machine unreachable during
             // the native call, which would let GC collect and close() free
             // native memory while code is executing.
             Reference.reachabilityFence(this);
+        }
+    }
+
+    /**
+     * Counts a call in before it touches native state. A call that starts while
+     * a close is deciding waits for it, and fails if the instance closed.
+     *
+     * @return whether this is the outermost call on this instance
+     */
+    private boolean enterCall() {
+        while (true) {
+            int depth = callDepth.incrementAndGet();
+            if (!closing) {
+                return depth == 1;
+            }
+            callDepth.decrementAndGet();
+            synchronized (this) {
+                if (closed) {
+                    throw new WasmEngineException("instance is closed");
+                }
+            }
         }
     }
 
