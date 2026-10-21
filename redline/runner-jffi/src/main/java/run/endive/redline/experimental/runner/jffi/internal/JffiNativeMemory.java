@@ -52,6 +52,9 @@ public final class JffiNativeMemory implements Memory, NativeResource {
     private static final int MEM_RELEASE = 0x8000;
     private static final int PAGE_NOACCESS = 0x01;
     private static final int PAGE_READWRITE = 0x04;
+    // POSIX mprotect, called directly: PageManager.protectPages drops its result
+    private static final long MPROTECT_ADDR;
+    private static final CallContext MPROTECT_CTX;
 
     static {
         if (IS_WINDOWS) {
@@ -77,11 +80,23 @@ public final class JffiNativeMemory implements Memory, NativeResource {
                             Type.SINT32,
                             new Type[] {Type.POINTER, Type.ULONG, Type.UINT32},
                             CallingConvention.DEFAULT);
+            MPROTECT_ADDR = 0;
+            MPROTECT_CTX = null;
         } else {
             VIRTUAL_ALLOC_ADDR = 0;
             VIRTUAL_FREE_ADDR = 0;
             VIRTUAL_ALLOC_CTX = null;
             VIRTUAL_FREE_CTX = null;
+            MPROTECT_ADDR = Library.getDefault().getSymbolAddress("mprotect");
+            if (MPROTECT_ADDR == 0) {
+                throw new ExceptionInInitializerError("mprotect not found");
+            }
+            // int mprotect(void *addr, size_t len, int prot)
+            MPROTECT_CTX =
+                    new CallContext(
+                            Type.SINT32,
+                            new Type[] {Type.POINTER, Type.ULONG, Type.SINT32},
+                            CallingConvention.DEFAULT);
         }
     }
 
@@ -91,6 +106,12 @@ public final class JffiNativeMemory implements Memory, NativeResource {
 
     private static int winVirtualFree(long addr, long size, int freeType) {
         return (int) INV.invokeN3(VIRTUAL_FREE_CTX, VIRTUAL_FREE_ADDR, addr, size, freeType);
+    }
+
+    private static boolean protectReadWrite(long addr, long osPages) {
+        int prot = PageManager.PROT_READ | PageManager.PROT_WRITE;
+        long size = osPages * PM.pageSize();
+        return (int) INV.invokeN3(MPROTECT_CTX, MPROTECT_ADDR, addr, size, prot) == 0;
     }
 
     private static final byte[] NO_DATA = new byte[0];
@@ -148,16 +169,9 @@ public final class JffiNativeMemory implements Memory, NativeResource {
                 if (reservedAddress == 0 || reservedAddress == -1) {
                     throw new WasmEngineException("Failed to reserve memory pages");
                 }
-                if (nPages > 0) {
-                    try {
-                        PM.protectPages(
-                                reservedAddress,
-                                nPages * osPerWasm,
-                                PageManager.PROT_READ | PageManager.PROT_WRITE);
-                    } catch (Throwable t) {
-                        PM.freePages(reservedAddress, reservedOsPages);
-                        throw new WasmEngineException("Failed to commit initial memory pages", t);
-                    }
+                if (nPages > 0 && !protectReadWrite(reservedAddress, (long) nPages * osPerWasm)) {
+                    PM.freePages(reservedAddress, reservedOsPages);
+                    throw new WasmEngineException("Failed to commit initial memory pages");
                 }
             }
         } else {
@@ -251,15 +265,13 @@ public final class JffiNativeMemory implements Memory, NativeResource {
                         return -1;
                     }
                 }
-            } else {
-                PM.protectPages(
-                        reservedAddress,
-                        numPages * osPerWasm,
-                        PageManager.PROT_READ | PageManager.PROT_WRITE);
+            } else if (!protectReadWrite(reservedAddress, (long) numPages * osPerWasm)) {
+                return -1;
             }
+            // the page count compiled code reads goes last, once Java accepts the new pages
+            this.nPages = numPages;
             VarHandle.releaseFence();
             MEM.putInt(pagesCell, numPages);
-            this.nPages = numPages;
         } catch (Throwable t) {
             return -1;
         }

@@ -81,6 +81,15 @@ public final class JffiNativeMachineFactory {
         }
 
         public Builder withMemoryLimits(MemoryLimits limits) {
+            var memories = module.memorySection();
+            if (memories.isPresent()
+                    && memories.get().memoryCount() > 0
+                    && memories.get().getMemory(0).limits().shared() != limits.shared()) {
+                // the native code was compiled for one or the other
+                throw new IllegalArgumentException(
+                        "The memory limits must keep the module's memory "
+                                + (limits.shared() ? "unshared" : "shared"));
+            }
             this.memoryLimits = limits;
             return this;
         }
