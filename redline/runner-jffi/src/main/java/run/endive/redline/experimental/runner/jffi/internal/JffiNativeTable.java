@@ -7,6 +7,7 @@ import java.util.Arrays;
 import run.endive.redline.experimental.api.internal.CtxBuffer;
 import run.endive.runtime.Instance;
 import run.endive.runtime.TableInstance;
+import run.endive.runtime.TrapException;
 import run.endive.wasm.WasmEngineException;
 import run.endive.wasm.types.Table;
 import run.endive.wasm.types.TableLimits;
@@ -67,7 +68,10 @@ public final class JffiNativeTable extends TableInstance {
 
         // Write header
         MEM.putInt(bufferAddress + CtxBuffer.TABLE_SIZE_OFFSET, initial);
-        MEM.putInt(bufferAddress + CtxBuffer.TABLE_MAX_OFFSET, max > 0 ? max : capacity);
+        // compiled table.grow checks only this, so it must not exceed the buffer
+        MEM.putInt(
+                bufferAddress + CtxBuffer.TABLE_MAX_OFFSET,
+                max > 0 ? Math.min(max, capacity) : capacity);
 
         // Only the entries below size are reachable: every access bounds-checks
         // against the size field, and grow fills the slots it exposes. Filling
@@ -151,6 +155,10 @@ public final class JffiNativeTable extends TableInstance {
      * @param owner the open native machine that defines the function
      */
     private void writeResolvedEntry(int index, int funcId, JffiNativeMachine owner) {
+        if (funcId < 0 || funcId >= owner.functionCount()) {
+            // a funcref from another instance can carry an id outside this one's functions
+            throw new TrapException("undefined element");
+        }
         long funcPtr = MEM.getLong(owner.getFuncTableAddress() + (long) funcId * 8);
         if (funcPtr == 0L) {
             // Not compiled, so only the owner's runner can report it
@@ -407,11 +415,11 @@ public final class JffiNativeTable extends TableInstance {
     @Override
     public int grow(int delta, int value, Instance instance) {
         int oldSize = size();
-        int newSize = oldSize + delta;
         int max = MEM.getInt(bufferAddress + CtxBuffer.TABLE_MAX_OFFSET);
-        if (delta < 0 || newSize > max || newSize > capacity) {
+        if (delta < 0 || delta > Math.min(max, capacity) - oldSize) {
             return -1;
         }
+        int newSize = oldSize + delta;
         fill(oldSize, newSize, value, instance);
         // Update size
         MEM.putInt(bufferAddress + CtxBuffer.TABLE_SIZE_OFFSET, newSize);
