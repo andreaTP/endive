@@ -114,6 +114,8 @@ public final class NativeMachine implements Machine {
     private boolean memBaseInitialized;
     private NativeMemory nativeMemory;
     private volatile Throwable pendingException;
+    // the machine whose outermost call is running on this thread
+    private static final ThreadLocal<NativeMachine> RUNNING = new ThreadLocal<>();
     // calls under way on any thread, which close() refuses to run under
     private final AtomicInteger callDepth = new AtomicInteger();
     // set by close() before it looks at callDepth, and kept once it succeeds
@@ -735,12 +737,7 @@ public final class NativeMachine implements Machine {
         for (int i = 0; i < argCount; i++) {
             args[i] = argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(i));
         }
-        // One stack budget for the whole chain, or each instance would add its own
-        long stackLimit = ctxBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.STACK_LIMIT);
-        long[] results =
-                owner.getMachine() instanceof NativeMachine ownerMachine
-                        ? ownerMachine.callWithStackLimit(funcId, args, stackLimit)
-                        : owner.getMachine().call(funcId, args);
+        long[] results = owner.getMachine().call(funcId, args);
         refreshMemoryPages();
         if (results == null || results.length == 0) {
             return 0L;
@@ -1082,11 +1079,6 @@ public final class NativeMachine implements Machine {
 
     @Override
     public long[] call(int funcId, long[] args) throws WasmEngineException {
-        return callWithStackLimit(funcId, args, 0L);
-    }
-
-    /** Calls with the stack limit an outermost call starts from, 0 to anchor a new one. */
-    private long[] callWithStackLimit(int funcId, long[] args, long stackLimit) {
         if (closed) {
             // Its native code and buffers are gone, but a table may still hold its functions
             throw new WasmEngineException("instance is closed");
@@ -1103,6 +1095,12 @@ public final class NativeMachine implements Machine {
         }
 
         boolean outermostCall = enterCall();
+        // a nested instance shares the stack budget of the one running on this thread
+        NativeMachine outer = null;
+        if (outermostCall) {
+            outer = RUNNING.get();
+            RUNNING.set(this);
+        }
         try {
             var funcType = (FunctionType) instance.type(instance.functionType(funcId));
 
@@ -1114,7 +1112,10 @@ public final class NativeMachine implements Machine {
             // against where the outer call began, or every level moves the
             // limit deeper and the guard stops firing.
             if (outermostCall) {
-                ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.STACK_LIMIT, stackLimit);
+                ctxBuffer.set(
+                        ValueLayout.JAVA_LONG,
+                        CtxBuffer.STACK_LIMIT,
+                        outer == null ? 0L : outer.stackLimit());
             }
 
             if (!memBaseInitialized) {
@@ -1199,12 +1200,24 @@ public final class NativeMachine implements Machine {
             sneakyThrow(e);
             throw new AssertionError("unreachable");
         } finally {
+            if (outermostCall) {
+                if (outer == null) {
+                    RUNNING.remove();
+                } else {
+                    RUNNING.set(outer);
+                }
+            }
             callDepth.decrementAndGet();
             // Prevent the JIT from considering this machine unreachable during
             // the native call, which would let GC collect and close() free
             // native memory while code is executing.
             Reference.reachabilityFence(this);
         }
+    }
+
+    // anchored at the outermost call's entry, then shared by everything nested in it
+    private long stackLimit() {
+        return ctxBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.STACK_LIMIT);
     }
 
     /**
