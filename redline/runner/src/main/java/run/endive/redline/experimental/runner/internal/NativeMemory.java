@@ -137,10 +137,10 @@ public final class NativeMemory implements Memory, AutoCloseable {
         try {
             long newSize = PAGE_SIZE * (long) numPages;
             PanamaExecutor.mprotectReadWrite(reserved, newSize);
-            PAGES_CELL.setVolatile(pagesCell, 0L, numPages);
-            // the segment first, so a host that sees the new page count can access it
             this.segment = reserved.reinterpret(newSize);
             this.nPages = numPages;
+            // the page count compiled code reads goes last, once Java accepts the new pages
+            PAGES_CELL.setVolatile(pagesCell, 0L, numPages);
         } catch (Throwable t) {
             return -1;
         }
