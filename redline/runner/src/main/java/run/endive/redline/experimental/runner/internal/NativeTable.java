@@ -85,20 +85,24 @@ public final class NativeTable extends TableInstance implements NativeResource {
         this.ownArena = ownArena;
         this.isExternRef = table.elementType().equals(ValType.ExternRef);
         int initial = (int) table.limits().min();
-        int max = (int) table.limits().max();
+        long max = table.limits().max();
         // Pre-allocate to max, capped at MAX_PREALLOC
-        this.capacity = (max > 0 && max <= MAX_PREALLOC) ? max : Math.max(initial, MAX_PREALLOC);
+        this.capacity = max <= MAX_PREALLOC ? (int) max : Math.max(initial, MAX_PREALLOC);
         long bufferSize =
                 CtxBuffer.TABLE_ENTRIES_OFFSET + (long) capacity * CtxBuffer.TABLE_ENTRY_SIZE;
-        this.buffer = arena.allocate(bufferSize, 8);
+        try {
+            // mapped rather than allocated, so only the entries in use take physical memory
+            this.buffer =
+                    PanamaExecutor.mmapReadWrite(bufferSize)
+                            .reinterpret(bufferSize, arena, PanamaExecutor::unmapQuietly);
+        } catch (Throwable e) {
+            throw new WasmEngineException("Failed to map a table of " + capacity + " entries", e);
+        }
 
         // Write header
         buffer.set(ValueLayout.JAVA_INT, CtxBuffer.TABLE_SIZE_OFFSET, initial);
         // compiled table.grow checks only this, so it must not exceed the buffer
-        buffer.set(
-                ValueLayout.JAVA_INT,
-                CtxBuffer.TABLE_MAX_OFFSET,
-                max > 0 ? Math.min(max, capacity) : capacity);
+        buffer.set(ValueLayout.JAVA_INT, CtxBuffer.TABLE_MAX_OFFSET, (int) Math.min(max, capacity));
 
         // Only the entries below size are reachable: every access bounds-checks
         // against the size field, and grow fills the slots it exposes. Filling

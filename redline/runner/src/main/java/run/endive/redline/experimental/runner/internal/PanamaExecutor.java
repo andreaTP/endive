@@ -129,8 +129,11 @@ final class PanamaExecutor {
         }
     }
 
-    /** Allocate a writable memory region. Must call mprotectExec before executing. */
-    static MemorySegment mmapCode(long size) throws Throwable {
+    /**
+     * Maps zeroed read-write pages, which take physical memory only once touched. Code
+     * must go through mprotectExec before it runs.
+     */
+    static MemorySegment mmapReadWrite(long size) throws Throwable {
         if (IS_WINDOWS) {
             MemorySegment addr =
                     (MemorySegment)

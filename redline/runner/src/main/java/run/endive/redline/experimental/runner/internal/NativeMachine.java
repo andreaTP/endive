@@ -218,7 +218,7 @@ public final class NativeMachine implements Machine {
         this.codeRegionSize = (Math.max(image.length, 1) + PAGE_SIZE - 1) & -PAGE_SIZE;
 
         try {
-            codeRegion = PanamaExecutor.mmapCode(codeRegionSize);
+            codeRegion = PanamaExecutor.mmapReadWrite(codeRegionSize);
             // unmapped with the arena; downcalls keep this global view and don't acquire it
             codeRegion.reinterpret(arena, PanamaExecutor::unmapQuietly);
             MemorySegment.copy(MemorySegment.ofArray(image), 0, codeRegion, 0, image.length);

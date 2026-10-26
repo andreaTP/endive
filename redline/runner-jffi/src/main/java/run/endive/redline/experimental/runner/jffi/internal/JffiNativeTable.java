@@ -3,6 +3,7 @@ package run.endive.redline.experimental.runner.jffi.internal;
 import static run.endive.wasm.types.Value.REF_NULL_VALUE;
 
 import com.kenai.jffi.MemoryIO;
+import com.kenai.jffi.PageManager;
 import java.util.Arrays;
 import run.endive.redline.experimental.api.internal.Borrowers;
 import run.endive.redline.experimental.api.internal.CtxBuffer;
@@ -40,8 +41,10 @@ public final class JffiNativeTable extends TableInstance implements NativeResour
 
     private static final int MAX_PREALLOC = 1_000_000;
     private static final MemoryIO MEM = MemoryIO.getInstance();
+    private static final PageManager PM = PageManager.getInstance();
 
     private final long bufferAddress;
+    private final int bufferPages;
     private final int capacity;
     private final boolean isExternRef;
     private final Borrowers borrowers = new Borrowers();
@@ -64,19 +67,23 @@ public final class JffiNativeTable extends TableInstance implements NativeResour
         super(table, initValue);
         this.isExternRef = table.elementType().equals(ValType.ExternRef);
         int initial = (int) table.limits().min();
-        int max = (int) table.limits().max();
-        this.capacity = (max > 0 && max <= MAX_PREALLOC) ? max : Math.max(initial, MAX_PREALLOC);
+        long max = table.limits().max();
+        this.capacity = max <= MAX_PREALLOC ? (int) max : Math.max(initial, MAX_PREALLOC);
         long bufferSize =
                 CtxBuffer.TABLE_ENTRIES_OFFSET + (long) capacity * CtxBuffer.TABLE_ENTRY_SIZE;
-        this.bufferAddress = MEM.allocateMemory(bufferSize, true);
+        // mapped rather than allocated, so only the entries in use take physical memory
+        this.bufferPages = (int) ((bufferSize + PM.pageSize() - 1) / PM.pageSize());
+        this.bufferAddress =
+                PM.allocatePages(bufferPages, PageManager.PROT_READ | PageManager.PROT_WRITE);
+        if (bufferAddress == 0 || bufferAddress == -1) {
+            throw new WasmEngineException("Failed to map a table of " + capacity + " entries");
+        }
         NativeResourceCount.allocated();
 
         // Write header
         MEM.putInt(bufferAddress + CtxBuffer.TABLE_SIZE_OFFSET, initial);
         // compiled table.grow checks only this, so it must not exceed the buffer
-        MEM.putInt(
-                bufferAddress + CtxBuffer.TABLE_MAX_OFFSET,
-                max > 0 ? Math.min(max, capacity) : capacity);
+        MEM.putInt(bufferAddress + CtxBuffer.TABLE_MAX_OFFSET, (int) Math.min(max, capacity));
 
         // Only the entries below size are reachable: every access bounds-checks
         // against the size field, and grow fills the slots it exposes. Filling
@@ -393,7 +400,7 @@ public final class JffiNativeTable extends TableInstance implements NativeResour
             throw borrowers.stillBorrowed("This table");
         }
         freed = true;
-        MEM.freeMemory(bufferAddress);
+        PM.freePages(bufferAddress, bufferPages);
         borrowers.freed();
         NativeResourceCount.freed();
     }
