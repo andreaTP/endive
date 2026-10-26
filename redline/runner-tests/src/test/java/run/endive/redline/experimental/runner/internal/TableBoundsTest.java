@@ -27,6 +27,14 @@ public class TableBoundsTest {
                 (table.grow $bounded (ref.null func) (local.get 0))))
             """;
 
+    private static final String EMPTY =
+            """
+            (module
+              (table 0 0 funcref)
+              (func (export "grow") (param i32) (result i32)
+                (table.grow 0 (ref.null func) (local.get 0))))
+            """;
+
     /** Its fourth function sits in the table it exports. */
     private static final String OWNER =
             """
@@ -62,6 +70,16 @@ public class TableBoundsTest {
             var table = instance.table(0);
             assertEquals(-1, table.grow(Integer.MAX_VALUE, Value.REF_NULL_VALUE, instance));
             assertEquals(1, table.size());
+        }
+    }
+
+    @Test
+    public void aTableDeclaredWithMaxZeroNeverGrows() {
+        try (var instance = nativeInstance(EMPTY, new Store())) {
+            assertEquals(-1, grow(instance, "grow", 1));
+            var table = instance.table(0);
+            assertEquals(-1, table.grow(1, Value.REF_NULL_VALUE, instance));
+            assertEquals(0, table.size());
         }
     }
 

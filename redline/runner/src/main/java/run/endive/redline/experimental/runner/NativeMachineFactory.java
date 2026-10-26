@@ -1,9 +1,5 @@
 package run.endive.redline.experimental.runner;
 
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
-import java.util.ArrayList;
-import java.util.List;
 import run.endive.redline.experimental.api.NativeCode;
 import run.endive.redline.experimental.runner.internal.NativeGlobalInstance;
 import run.endive.redline.experimental.runner.internal.NativeMachine;
@@ -23,33 +19,10 @@ import run.endive.wasm.types.ValType;
 
 public final class NativeMachineFactory {
 
-    private final Arena arena = Arena.ofShared();
-    private final WasmModule module;
     private final NativeCode precompiledCode;
-    private final List<NativeTable> nativeTables = new ArrayList<>();
-    private MemorySegment globalsBuffer;
-    private int globalIndex;
-    private NativeMachine nativeMachine;
 
-    private NativeMachineFactory(WasmModule module, NativeCode precompiledCode) {
-        this.module = module;
+    private NativeMachineFactory(NativeCode precompiledCode) {
         this.precompiledCode = precompiledCode;
-
-        int importGlobalCount =
-                (int)
-                        module.importSection().stream()
-                                .filter(
-                                        i ->
-                                                i.importType()
-                                                        == run.endive.wasm.types.ExternalType
-                                                                .GLOBAL)
-                                .count();
-        int definedGlobalCount =
-                module.globalSection() != null ? module.globalSection().globalCount() : 0;
-        int totalGlobals = importGlobalCount + definedGlobalCount;
-        this.globalsBuffer =
-                totalGlobals > 0 ? arena.allocate((long) totalGlobals * 8, 8) : MemorySegment.NULL;
-        this.globalIndex = importGlobalCount;
     }
 
     public static Builder builder(WasmModule module) {
@@ -57,23 +30,21 @@ public final class NativeMachineFactory {
     }
 
     public TableInstance createTable(Table table, int initValue) {
-        var nativeTable = new NativeTable(table, initValue, arena);
-        nativeTables.add(nativeTable);
-        return nativeTable;
+        return new NativeTable(table, initValue);
     }
 
     public static TableInstance createImportTable(Table table, int initValue) {
-        return new NativeTable(table, initValue, Arena.ofAuto());
+        return new NativeTable(table, initValue);
     }
 
     public GlobalInstance createGlobal(
             long value, long highValue, ValType type, MutabilityType mutability) {
-        return new NativeGlobalInstance(globalsBuffer, globalIndex++, value, type, mutability);
+        return NativeGlobalInstance.defined(value, type, mutability);
     }
 
     public static GlobalInstance createImportGlobal(
             long value, ValType type, MutabilityType mutability) {
-        return NativeGlobalInstance.standalone(value, type, mutability);
+        return NativeGlobalInstance.hostCreated(value, type, mutability);
     }
 
     public static Memory createMemory(MemoryLimits limits) {
@@ -81,20 +52,7 @@ public final class NativeMachineFactory {
     }
 
     public Machine compile(Instance instance) {
-        int importGlobalCount =
-                (int)
-                        module.importSection().stream()
-                                .filter(
-                                        i ->
-                                                i.importType()
-                                                        == run.endive.wasm.types.ExternalType
-                                                                .GLOBAL)
-                                .count();
-        this.globalIndex = importGlobalCount;
-        this.nativeTables.clear();
-        this.nativeMachine =
-                new NativeMachine(instance, arena, nativeTables, globalsBuffer, precompiledCode);
-        return nativeMachine;
+        return new NativeMachine(instance, precompiledCode);
     }
 
     public static final class Builder {
@@ -145,7 +103,7 @@ public final class NativeMachineFactory {
         }
 
         public Instance.Builder toInstanceBuilder() {
-            var factory = new NativeMachineFactory(module, precompiledCode);
+            var factory = new NativeMachineFactory(precompiledCode);
             return Instance.builder(module)
                     .withMachineFactory(factory::compile)
                     .withTableFactory(factory::createTable)

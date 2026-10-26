@@ -3,6 +3,8 @@ package run.endive.redline.experimental.runner.jffi.internal;
 import static run.endive.wasm.types.Value.REF_NULL_VALUE;
 
 import com.kenai.jffi.MemoryIO;
+import com.kenai.jffi.PageManager;
+import java.lang.ref.Reference;
 import java.util.Arrays;
 import run.endive.redline.experimental.api.internal.CtxBuffer;
 import run.endive.runtime.Instance;
@@ -37,11 +39,12 @@ public final class JffiNativeTable extends TableInstance {
 
     private static final int MAX_PREALLOC = 1_000_000;
     private static final MemoryIO MEM = MemoryIO.getInstance();
+    private static final PageManager PM = PageManager.getInstance();
 
     private final long bufferAddress;
+    private final int bufferPages;
     private final int capacity;
     private final boolean isExternRef;
-    private boolean freed;
 
     /**
      * Owner of each entry written from Java without an owner id: one not
@@ -60,18 +63,26 @@ public final class JffiNativeTable extends TableInstance {
         super(table, initValue);
         this.isExternRef = table.elementType().equals(ValType.ExternRef);
         int initial = (int) table.limits().min();
-        int max = (int) table.limits().max();
-        this.capacity = (max > 0 && max <= MAX_PREALLOC) ? max : Math.max(initial, MAX_PREALLOC);
+        long max = table.limits().max();
+        this.capacity = max <= MAX_PREALLOC ? (int) max : Math.max(initial, MAX_PREALLOC);
         long bufferSize =
                 CtxBuffer.TABLE_ENTRIES_OFFSET + (long) capacity * CtxBuffer.TABLE_ENTRY_SIZE;
-        this.bufferAddress = MEM.allocateMemory(bufferSize, true);
+        // mapped rather than allocated, so only the entries in use take physical memory
+        this.bufferPages = (int) ((bufferSize + PM.pageSize() - 1) / PM.pageSize());
+        this.bufferAddress =
+                PM.allocatePages(bufferPages, PageManager.PROT_READ | PageManager.PROT_WRITE);
+        if (bufferAddress == 0 || bufferAddress == -1) {
+            throw new WasmEngineException("Failed to map a table of " + capacity + " entries");
+        }
+        // locals, so the free doesn't reach this table and keep it alive
+        long address = bufferAddress;
+        int pages = bufferPages;
+        JffiCleaner.register(this, () -> PM.freePages(address, pages));
 
         // Write header
         MEM.putInt(bufferAddress + CtxBuffer.TABLE_SIZE_OFFSET, initial);
         // compiled table.grow checks only this, so it must not exceed the buffer
-        MEM.putInt(
-                bufferAddress + CtxBuffer.TABLE_MAX_OFFSET,
-                max > 0 ? Math.min(max, capacity) : capacity);
+        MEM.putInt(bufferAddress + CtxBuffer.TABLE_MAX_OFFSET, (int) Math.min(max, capacity));
 
         // Only the entries below size are reachable: every access bounds-checks
         // against the size field, and grow fills the slots it exposes. Filling
@@ -119,21 +130,30 @@ public final class JffiNativeTable extends TableInstance {
         MEM.putLong(base + CtxBuffer.ENTRY_OWNER_ID_OFFSET, ownerId);
     }
 
+    private int funcIdAt(int index) {
+        return MEM.getInt(bufferAddress + entryBase(index) + CtxBuffer.ENTRY_FUNC_ID_OFFSET);
+    }
+
     private long ownerId(int index) {
         return MEM.getLong(bufferAddress + entryBase(index) + CtxBuffer.ENTRY_OWNER_ID_OFFSET);
     }
 
     /** Resolves entries written with no owner, which only a host does, against {@code instance}. */
     void resolvePendingRefs(Instance instance) {
-        if (isExternRef) {
-            return;
-        }
-        int sz = size();
-        for (int i = 0; i < sz; i++) {
-            int funcId = MEM.getInt(bufferAddress + entryBase(i) + CtxBuffer.ENTRY_FUNC_ID_OFFSET);
-            if (funcId != REF_NULL_VALUE && ownerId(i) == 0L && recordedOwner(i) == null) {
-                resolveFromInstance(i, funcId, instance);
+        try {
+            if (isExternRef) {
+                return;
             }
+            int sz = size();
+            for (int i = 0; i < sz; i++) {
+                int funcId =
+                        MEM.getInt(bufferAddress + entryBase(i) + CtxBuffer.ENTRY_FUNC_ID_OFFSET);
+                if (funcId != REF_NULL_VALUE && ownerId(i) == 0L && recordedOwner(i) == null) {
+                    resolveFromInstance(i, funcId, instance);
+                }
+            }
+        } finally {
+            Reference.reachabilityFence(this);
         }
     }
 
@@ -152,22 +172,32 @@ public final class JffiNativeTable extends TableInstance {
      *
      * @param index the entry to write
      * @param funcId the function id, in {@code owner}'s index space
-     * @param owner the open native machine that defines the function
+     * @param owner the native machine that defines the function
      */
     private void writeResolvedEntry(int index, int funcId, JffiNativeMachine owner) {
         if (funcId < 0 || funcId >= owner.functionCount()) {
             // a funcref from another instance can carry an id outside this one's functions
             throw new TrapException("undefined element");
         }
-        long funcPtr = MEM.getLong(owner.getFuncTableAddress() + (long) funcId * 8);
+        long funcPtr;
+        int typeIdx;
+        try {
+            funcPtr = MEM.getLong(owner.getFuncTableAddress() + (long) funcId * 8);
+            typeIdx = MEM.getInt(owner.getFuncTypesArrayAddress() + (long) funcId * 4);
+        } finally {
+            // the addresses are the owner's, freed once it is unreachable
+            Reference.reachabilityFence(owner);
+        }
         if (funcPtr == 0L) {
             // Not compiled, so only the owner's runner can report it
             writeUnresolvedEntry(index, funcId, owner.instance());
             return;
         }
-        registerWriter(owner);
-        int typeIdx = MEM.getInt(owner.getFuncTypesArrayAddress() + (long) funcId * 4);
-        writeEntry(index, typeIdx, funcId, funcPtr, owner.ownerId());
+        // together, so a prune can't drop the owner before the entry names it
+        synchronized (this) {
+            registerWriter(owner);
+            writeEntry(index, typeIdx, funcId, funcPtr, owner.ownerId());
+        }
         setOwner(index, null);
     }
 
@@ -227,42 +257,42 @@ public final class JffiNativeTable extends TableInstance {
 
     /** Keeps {@code writer}, whose id entries of this table may now hold. */
     void registerWriter(JffiNativeMachine writer) {
-        if (lastWriter == writer) {
-            return;
-        }
-        synchronized (this) {
-            for (JffiNativeMachine w : writers) {
-                if (w == writer) {
-                    lastWriter = writer;
-                    return;
+        try {
+            if (lastWriter == writer) {
+                return;
+            }
+            synchronized (this) {
+                for (JffiNativeMachine w : writers) {
+                    if (w == writer) {
+                        lastWriter = writer;
+                        return;
+                    }
                 }
+                if (writers.length >= pruneAt) {
+                    pruneWriters();
+                    pruneAt = Math.max(8, writers.length * 2);
+                }
+                JffiNativeMachine[] grown = Arrays.copyOf(writers, writers.length + 1);
+                grown[writers.length] = writer;
+                writers = grown;
+                lastWriter = writer;
             }
-            if (writers.length >= pruneAt) {
-                pruneWriters();
-                pruneAt = Math.max(8, writers.length * 2);
-            }
-            JffiNativeMachine[] grown = Arrays.copyOf(writers, writers.length + 1);
-            grown[writers.length] = writer;
-            writers = grown;
-            lastWriter = writer;
+        } finally {
+            Reference.reachabilityFence(this);
         }
     }
 
-    // Drops closed writers that no entry refers to any more
+    // Drops writers no entry refers to any more, so the table stops keeping them alive
     private void pruneWriters() {
         JffiNativeMachine[] current = writers;
         boolean[] keep = new boolean[current.length];
-        boolean anyClosed = false;
-        for (int w = 0; w < current.length; w++) {
-            keep[w] = !current[w].isClosed();
-            anyClosed |= !keep[w];
-        }
-        if (!anyClosed) {
-            return;
-        }
         int sz = size();
         for (int i = 0; i < sz; i++) {
             long id = ownerId(i);
+            if (id != 0L || funcIdAt(i) == REF_NULL_VALUE) {
+                // native writes don't clear it, and it would keep its instance alive
+                setOwner(i, null);
+            }
             if (id != 0L) {
                 for (int w = 0; w < current.length; w++) {
                     if (current[w].ownerId() == id) {
@@ -272,11 +302,18 @@ public final class JffiNativeTable extends TableInstance {
                 }
             }
         }
+        for (int w = 0; w < current.length; w++) {
+            // a running machine may be between checking its flag and writing an entry
+            keep[w] |= current[w].isRunning();
+        }
         JffiNativeMachine[] kept = new JffiNativeMachine[current.length];
         int count = 0;
         for (int w = 0; w < current.length; w++) {
             if (keep[w]) {
                 kept[count++] = current[w];
+            } else {
+                // its next native table.set registers it again
+                current[w].forgetTableWriter(this);
             }
         }
         writers = Arrays.copyOf(kept, count);
@@ -300,53 +337,65 @@ public final class JffiNativeTable extends TableInstance {
 
     /** Writes {@code funcId}, a function of {@code instance}, to entries [from, to). */
     void fill(int from, int to, int funcId, Instance instance) {
-        for (int i = from; i < to; i++) {
-            if (funcId == REF_NULL_VALUE) {
-                writeNullEntry(i);
-            } else {
-                resolveFromInstance(i, funcId, instance);
+        try {
+            for (int i = from; i < to; i++) {
+                if (funcId == REF_NULL_VALUE) {
+                    writeNullEntry(i);
+                } else {
+                    resolveFromInstance(i, funcId, instance);
+                }
             }
+        } finally {
+            Reference.reachabilityFence(this);
         }
     }
 
     /** Copies {@code count} entries and their owners from {@code src}, which may be this table. */
     void copyFrom(JffiNativeTable src, int srcIndex, int dstIndex, int count) {
-        if (dstIndex <= srcIndex) {
-            for (int i = 0; i < count; i++) {
-                copyEntry(src, srcIndex + i, dstIndex + i);
-            }
-        } else {
-            for (int i = count - 1; i >= 0; i--) {
-                copyEntry(src, srcIndex + i, dstIndex + i);
-            }
-        }
-        if (src != this) {
-            long lastId = 0L;
-            for (int i = dstIndex; i < dstIndex + count; i++) {
-                long id = ownerId(i);
-                if (id != 0L && id != lastId) {
-                    registerWriter(src.writer(id));
-                    lastId = id;
+        try {
+            if (dstIndex <= srcIndex) {
+                for (int i = 0; i < count; i++) {
+                    copyEntry(src, srcIndex + i, dstIndex + i);
+                }
+            } else {
+                for (int i = count - 1; i >= 0; i--) {
+                    copyEntry(src, srcIndex + i, dstIndex + i);
                 }
             }
-        }
-        int fromSrc = Math.max(0, Math.min(count, src.owners.length - srcIndex));
-        if (fromSrc > 0) {
-            ensureOwners(dstIndex + fromSrc);
-            // Read src.owners after the resize, as src may be this table
-            System.arraycopy(src.owners, srcIndex, owners, dstIndex, fromSrc);
-        }
-        int clearTo = Math.min(dstIndex + count, owners.length);
-        if (dstIndex + fromSrc < clearTo) {
-            Arrays.fill(owners, dstIndex + fromSrc, clearTo, null);
+            if (src != this) {
+                long lastId = 0L;
+                for (int i = dstIndex; i < dstIndex + count; i++) {
+                    long id = ownerId(i);
+                    if (id != 0L && id != lastId) {
+                        registerWriter(src.writer(id));
+                        lastId = id;
+                    }
+                }
+            }
+            int fromSrc = Math.max(0, Math.min(count, src.owners.length - srcIndex));
+            if (fromSrc > 0) {
+                ensureOwners(dstIndex + fromSrc);
+                // Read src.owners after the resize, as src may be this table
+                System.arraycopy(src.owners, srcIndex, owners, dstIndex, fromSrc);
+            }
+            int clearTo = Math.min(dstIndex + count, owners.length);
+            if (dstIndex + fromSrc < clearTo) {
+                Arrays.fill(owners, dstIndex + fromSrc, clearTo, null);
+            }
+        } finally {
+            Reference.reachabilityFence(this);
         }
     }
 
     private void copyEntry(JffiNativeTable src, int srcIndex, int dstIndex) {
-        MEM.copyMemory(
-                src.bufferAddress + src.entryBase(srcIndex),
-                bufferAddress + entryBase(dstIndex),
-                CtxBuffer.TABLE_ENTRY_SIZE);
+        try {
+            MEM.copyMemory(
+                    src.bufferAddress + src.entryBase(srcIndex),
+                    bufferAddress + entryBase(dstIndex),
+                    CtxBuffer.TABLE_ENTRY_SIZE);
+        } finally {
+            Reference.reachabilityFence(src);
+        }
     }
 
     /** Get the native address of the table buffer, for passing to native code. */
@@ -358,22 +407,13 @@ public final class JffiNativeTable extends TableInstance {
         return isExternRef;
     }
 
-    /** Whether the off-heap buffer has been released. */
-    boolean isFreed() {
-        return freed;
-    }
-
-    /** Free the off-heap buffer. Idempotent — safe to call multiple times. */
-    public void free() {
-        if (!freed && bufferAddress != 0) {
-            freed = true;
-            MEM.freeMemory(bufferAddress);
-        }
-    }
-
     @Override
     public int size() {
-        return MEM.getInt(bufferAddress + CtxBuffer.TABLE_SIZE_OFFSET);
+        try {
+            return MEM.getInt(bufferAddress + CtxBuffer.TABLE_SIZE_OFFSET);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
@@ -388,11 +428,15 @@ public final class JffiNativeTable extends TableInstance {
 
     @Override
     public int ref(int index) {
-        if (index < 0 || index >= size()) {
-            throw new WasmEngineException("undefined element");
+        try {
+            if (index < 0 || index >= size()) {
+                throw new WasmEngineException("undefined element");
+            }
+            long base = bufferAddress + entryBase(index);
+            return MEM.getInt(base + CtxBuffer.ENTRY_FUNC_ID_OFFSET);
+        } finally {
+            Reference.reachabilityFence(this);
         }
-        long base = bufferAddress + entryBase(index);
-        return MEM.getInt(base + CtxBuffer.ENTRY_FUNC_ID_OFFSET);
     }
 
     @Override
@@ -406,25 +450,33 @@ public final class JffiNativeTable extends TableInstance {
 
     @Override
     public void setRef(int index, int value, Instance instance) {
-        if (index < 0 || index >= size()) {
-            throw new run.endive.wasm.UninstantiableException("out of bounds table access");
+        try {
+            if (index < 0 || index >= size()) {
+                throw new run.endive.wasm.UninstantiableException("out of bounds table access");
+            }
+            fill(index, index + 1, value, instance);
+        } finally {
+            Reference.reachabilityFence(this);
         }
-        fill(index, index + 1, value, instance);
     }
 
     @Override
     public int grow(int delta, int value, Instance instance) {
-        int oldSize = size();
-        int max = MEM.getInt(bufferAddress + CtxBuffer.TABLE_MAX_OFFSET);
-        if (delta < 0 || delta > Math.min(max, capacity) - oldSize) {
-            return -1;
+        try {
+            int oldSize = size();
+            int max = MEM.getInt(bufferAddress + CtxBuffer.TABLE_MAX_OFFSET);
+            if (delta < 0 || delta > Math.min(max, capacity) - oldSize) {
+                return -1;
+            }
+            int newSize = oldSize + delta;
+            fill(oldSize, newSize, value, instance);
+            // Update size
+            MEM.putInt(bufferAddress + CtxBuffer.TABLE_SIZE_OFFSET, newSize);
+            limits().grow(delta);
+            return oldSize;
+        } finally {
+            Reference.reachabilityFence(this);
         }
-        int newSize = oldSize + delta;
-        fill(oldSize, newSize, value, instance);
-        // Update size
-        MEM.putInt(bufferAddress + CtxBuffer.TABLE_SIZE_OFFSET, newSize);
-        limits().grow(delta);
-        return oldSize;
     }
 
     /**
@@ -437,18 +489,26 @@ public final class JffiNativeTable extends TableInstance {
      */
     @Override
     public Instance instance(int index) {
-        if (index < 0 || index >= size() || isExternRef || ref(index) == REF_NULL_VALUE) {
-            return null;
+        try {
+            if (index < 0 || index >= size() || isExternRef || ref(index) == REF_NULL_VALUE) {
+                return null;
+            }
+            long id = ownerId(index);
+            return id != 0L ? writer(id).instance() : recordedOwner(index);
+        } finally {
+            Reference.reachabilityFence(this);
         }
-        long id = ownerId(index);
-        return id != 0L ? writer(id).instance() : recordedOwner(index);
     }
 
     @Override
     public void reset() {
-        int sz = size();
-        for (int i = 0; i < sz; i++) {
-            writeNullEntry(i);
+        try {
+            int sz = size();
+            for (int i = 0; i < sz; i++) {
+                writeNullEntry(i);
+            }
+        } finally {
+            Reference.reachabilityFence(this);
         }
     }
 }

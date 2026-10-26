@@ -128,6 +128,23 @@ try (var instance = MyModule.builder().build()) {
 }
 ```
 
+## Native memory
+
+A natively compiled instance keeps its code, linear memory and tables outside the Java heap. The
+garbage collector frees them once nothing references them: closing is optional, and a memory,
+table or global keeps working for as long as you hold it, even after the instance that made it is
+closed or gone. A table also keeps alive every instance whose functions it holds.
+
+- `close()` stops the instance: calls made after it throw `WasmEngineException`, while a call
+  already running finishes. It never throws.
+- The garbage collector doesn't count native memory as heap, and running low on it doesn't trigger
+  a collection, so an instance you no longer reference holds its native memory until a collection
+  happens to find it. With many large, short-lived instances, leave room for that in the
+  process's memory limit.
+- A mutable global the host creates is shared live with one native instance at a time. Another
+  instance that imports it while the first is open, or not yet collected, starts from a copy of
+  its value.
+
 ## Falling back
 
 When native code cannot be used, `builder()` falls back to the bytecode produced by the

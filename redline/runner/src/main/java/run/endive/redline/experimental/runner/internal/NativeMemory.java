@@ -2,6 +2,7 @@ package run.endive.redline.experimental.runner.internal;
 
 import static run.endive.runtime.ConstantEvaluators.computeConstantValue;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.VarHandle;
@@ -24,8 +25,11 @@ import run.endive.wasm.types.PassiveDataSegment;
  * <p>Reserves the full maximum address range upfront with PROT_NONE (no physical
  * memory committed), then mprotects pages as needed. Grow is zero-copy — just
  * mprotect the next range. The base address never changes.
+ *
+ * <p>The mapping lives in an automatic arena, so it is unmapped once nothing reaches the
+ * memory: compiled code only uses it through an instance that holds the memory.
  */
-public final class NativeMemory implements Memory, AutoCloseable {
+public final class NativeMemory implements Memory {
 
     // Static final so the JIT folds each layout's VarHandle; withOrder() allocates per call.
     private static final ValueLayout.OfInt INT_UNALIGNED_LE =
@@ -43,7 +47,7 @@ public final class NativeMemory implements Memory, AutoCloseable {
     private final NativeWaiters waiters;
     private final NativeAtomics atomics;
     // Page count compiled code reads for a shared memory, which other instances may grow
-    private MemorySegment pagesCell;
+    private final MemorySegment pagesCell;
     private volatile MemorySegment segment;
     private volatile int nPages;
     private DataSegment[] dataSegments;
@@ -63,26 +67,24 @@ public final class NativeMemory implements Memory, AutoCloseable {
         this.reservedSize = PAGE_SIZE * (long) maxPages;
         this.waiters = new NativeWaiters(limits.shared());
 
+        var arena = Arena.ofAuto();
         MemorySegment mapping = MemorySegment.NULL;
         try {
-            mapping = PanamaExecutor.mmapNoAccess(reservedSize);
+            if (reservedSize > 0) {
+                mapping =
+                        PanamaExecutor.mmapNoAccess(reservedSize)
+                                .reinterpret(reservedSize, arena, PanamaExecutor::unmapQuietly);
+            }
             if (nPages > 0) {
                 PanamaExecutor.mprotectReadWrite(mapping, PAGE_SIZE * (long) nPages);
             }
-            this.pagesCell = PanamaExecutor.malloc(Integer.BYTES);
         } catch (Throwable t) {
-            var failure = new WasmEngineException("Failed to mmap native memory", t);
-            if (reservedSize > 0 && mapping.address() != 0) {
-                try {
-                    PanamaExecutor.munmap(mapping, reservedSize);
-                } catch (Throwable e) {
-                    failure.addSuppressed(e);
-                }
-            }
-            throw failure;
+            // the garbage collector unmaps the reservation, if there is one
+            throw new WasmEngineException("Failed to mmap native memory", t);
         }
 
         this.reserved = mapping;
+        this.pagesCell = arena.allocate(ValueLayout.JAVA_INT);
         PAGES_CELL.setVolatile(pagesCell, 0L, nPages);
         this.segment = reserved.reinterpret(PAGE_SIZE * (long) nPages);
         this.atomics =
@@ -90,25 +92,7 @@ public final class NativeMemory implements Memory, AutoCloseable {
                         reservedSize > 0
                                 ? reserved.reinterpret(reservedSize).asByteBuffer()
                                 : ByteBuffer.allocateDirect(0));
-    }
-
-    @Override
-    public void close() {
-        if (reservedSize > 0) {
-            try {
-                PanamaExecutor.munmap(reserved, reservedSize);
-            } catch (Throwable e) {
-                throw new WasmEngineException("Failed to unmap native memory", e);
-            }
-        }
-        if (pagesCell.address() != 0) {
-            try {
-                PanamaExecutor.free(pagesCell);
-            } catch (Throwable e) {
-                throw new WasmEngineException("Failed to free native memory page count", e);
-            }
-            pagesCell = MemorySegment.NULL;
-        }
+        PanamaExecutor.countUntilFreed(arena);
     }
 
     /** Get the native address of the memory buffer, for passing to native code. */

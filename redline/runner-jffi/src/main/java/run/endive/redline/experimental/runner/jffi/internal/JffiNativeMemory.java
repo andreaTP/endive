@@ -10,6 +10,7 @@ import com.kenai.jffi.MemoryIO;
 import com.kenai.jffi.PageManager;
 import com.kenai.jffi.Type;
 import java.lang.invoke.VarHandle;
+import java.lang.ref.Reference;
 import java.nio.ByteBuffer;
 import run.endive.redline.experimental.api.internal.NativeAtomics;
 import run.endive.redline.experimental.api.internal.NativeWaiters;
@@ -29,7 +30,7 @@ import run.endive.wasm.types.PassiveDataSegment;
  * memory committed), then mprotects pages as needed. Grow is zero-copy — just
  * mprotect the next range. The base address never changes.
  */
-public final class JffiNativeMemory implements Memory, AutoCloseable {
+public final class JffiNativeMemory implements Memory {
 
     private static final MemoryIO MEM = MemoryIO.getInstance();
     private static final PageManager PM = PageManager.getInstance();
@@ -120,7 +121,7 @@ public final class JffiNativeMemory implements Memory, AutoCloseable {
     private final NativeWaiters waiters;
     private final NativeAtomics atomics;
     // Page count compiled code reads for a shared memory, which other instances may grow
-    private long pagesCell;
+    private final long pagesCell;
     private volatile int nPages;
     private DataSegment[] dataSegments;
 
@@ -175,9 +176,18 @@ public final class JffiNativeMemory implements Memory, AutoCloseable {
         this.waiters = new NativeWaiters(limits.shared());
         this.pagesCell = MEM.allocateMemory(Integer.BYTES, true);
         if (pagesCell == 0) {
-            freeReservation();
+            freeReservation(reservedAddress, reservedOsPages);
             throw new WasmEngineException("Failed to allocate the memory page count");
         }
+        // registered as soon as both exist, so a failure below still frees them; locals,
+        // so the frees don't reach this memory and keep it alive
+        long reservation = reservedAddress;
+        int reservationPages = reservedOsPages;
+        long cell = pagesCell;
+        JffiCleaner.register(
+                this,
+                () -> freeReservation(reservation, reservationPages),
+                () -> MEM.freeMemory(cell));
         MEM.putInt(pagesCell, nPages);
         this.atomics =
                 new NativeAtomics(
@@ -187,22 +197,13 @@ public final class JffiNativeMemory implements Memory, AutoCloseable {
                                 : ByteBuffer.allocateDirect(0));
     }
 
-    private void freeReservation() {
-        if (reservedOsPages > 0 && reservedAddress != 0) {
+    private static void freeReservation(long address, int osPages) {
+        if (osPages > 0 && address != 0) {
             if (IS_WINDOWS) {
-                winVirtualFree(reservedAddress, 0, MEM_RELEASE);
+                winVirtualFree(address, 0, MEM_RELEASE);
             } else {
-                PM.freePages(reservedAddress, reservedOsPages);
+                PM.freePages(address, osPages);
             }
-        }
-    }
-
-    @Override
-    public void close() {
-        freeReservation();
-        if (pagesCell != 0) {
-            MEM.freeMemory(pagesCell);
-            pagesCell = 0;
         }
     }
 
@@ -223,36 +224,40 @@ public final class JffiNativeMemory implements Memory, AutoCloseable {
 
     @Override
     public synchronized int grow(int size) {
-        var prevPages = nPages;
-        var numPages = prevPages + size;
-        if (numPages > maximumPages() || numPages < prevPages) {
-            return -1;
-        }
-
         try {
-            if (IS_WINDOWS) {
-                int osPageSize = (int) PM.pageSize();
-                long commitSize = (long) numPages * osPerWasm * osPageSize;
-                if (commitSize > 0) {
-                    long committed =
-                            winVirtualAlloc(
-                                    reservedAddress, commitSize, MEM_COMMIT, PAGE_READWRITE);
-                    if (committed == 0) {
-                        return -1;
-                    }
-                }
-            } else if (!protectReadWrite(reservedAddress, (long) numPages * osPerWasm)) {
+            var prevPages = nPages;
+            var numPages = prevPages + size;
+            if (numPages > maximumPages() || numPages < prevPages) {
                 return -1;
             }
-            // the page count compiled code reads goes last, once Java accepts the new pages
-            this.nPages = numPages;
-            VarHandle.releaseFence();
-            MEM.putInt(pagesCell, numPages);
-        } catch (Throwable t) {
-            return -1;
-        }
 
-        return prevPages;
+            try {
+                if (IS_WINDOWS) {
+                    int osPageSize = (int) PM.pageSize();
+                    long commitSize = (long) numPages * osPerWasm * osPageSize;
+                    if (commitSize > 0) {
+                        long committed =
+                                winVirtualAlloc(
+                                        reservedAddress, commitSize, MEM_COMMIT, PAGE_READWRITE);
+                        if (committed == 0) {
+                            return -1;
+                        }
+                    }
+                } else if (!protectReadWrite(reservedAddress, (long) numPages * osPerWasm)) {
+                    return -1;
+                }
+                // the page count compiled code reads goes last, once Java accepts the new pages
+                this.nPages = numPages;
+                VarHandle.releaseFence();
+                MEM.putInt(pagesCell, numPages);
+            } catch (Throwable t) {
+                return -1;
+            }
+
+            return prevPages;
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
@@ -299,24 +304,28 @@ public final class JffiNativeMemory implements Memory, AutoCloseable {
 
     @Override
     public void initialize(Instance instance, DataSegment[] dataSegments) {
-        this.dataSegments = dataSegments;
-        if (dataSegments == null) {
-            return;
-        }
-        for (var s : dataSegments) {
-            if (s instanceof ActiveDataSegment) {
-                var seg = (ActiveDataSegment) s;
-                var data = seg.bytes();
-                var offset = (int) computeConstantValue(instance, seg.offsetInstructions())[0];
-                if (offset < 0 || (long) offset + data.length > sizeInBytes()) {
-                    throw new UninstantiableException(
-                            "out of bounds memory access: offset="
-                                    + offset
-                                    + " size="
-                                    + data.length);
-                }
-                MEM.putByteArray(reservedAddress + offset, data, 0, data.length);
+        try {
+            this.dataSegments = dataSegments;
+            if (dataSegments == null) {
+                return;
             }
+            for (var s : dataSegments) {
+                if (s instanceof ActiveDataSegment) {
+                    var seg = (ActiveDataSegment) s;
+                    var data = seg.bytes();
+                    var offset = (int) computeConstantValue(instance, seg.offsetInstructions())[0];
+                    if (offset < 0 || (long) offset + data.length > sizeInBytes()) {
+                        throw new UninstantiableException(
+                                "out of bounds memory access: offset="
+                                        + offset
+                                        + " size="
+                                        + data.length);
+                    }
+                    MEM.putByteArray(reservedAddress + offset, data, 0, data.length);
+                }
+            }
+        } finally {
+            Reference.reachabilityFence(this);
         }
     }
 
@@ -338,68 +347,108 @@ public final class JffiNativeMemory implements Memory, AutoCloseable {
      */
     private void checkBounds(int addr, int size) {
         if (Integer.toUnsignedLong(addr) + Integer.toUnsignedLong(size) > sizeInBytes()) {
-            throw new run.endive.runtime.WasmRuntimeException("out of bounds memory access");
+            throw outOfBounds();
         }
+    }
+
+    private static RuntimeException outOfBounds() {
+        return new run.endive.runtime.WasmRuntimeException("out of bounds memory access");
     }
 
     @Override
     public void write(int addr, byte[] data, int offset, int size) {
-        long limit = sizeInBytes();
-        if (Integer.toUnsignedLong(offset) + Integer.toUnsignedLong(size) > data.length
-                || Integer.toUnsignedLong(addr) + Integer.toUnsignedLong(size) > limit) {
-            throw new run.endive.runtime.WasmRuntimeException("out of bounds memory access");
+        try {
+            long limit = sizeInBytes();
+            if (Integer.toUnsignedLong(offset) + Integer.toUnsignedLong(size) > data.length
+                    || Integer.toUnsignedLong(addr) + Integer.toUnsignedLong(size) > limit) {
+                throw outOfBounds();
+            }
+            MEM.putByteArray(reservedAddress + addr, data, offset, size);
+        } finally {
+            Reference.reachabilityFence(this);
         }
-        MEM.putByteArray(reservedAddress + addr, data, offset, size);
     }
 
     @Override
     public byte read(int addr) {
-        checkBounds(addr, 1);
-        return MEM.getByte(reservedAddress + addr);
+        try {
+            checkBounds(addr, 1);
+            return MEM.getByte(reservedAddress + addr);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public byte[] readBytes(int addr, int len) {
-        checkBounds(addr, len);
-        byte[] result = new byte[len];
-        MEM.getByteArray(reservedAddress + addr, result, 0, len);
-        return result;
+        try {
+            checkBounds(addr, len);
+            byte[] result = new byte[len];
+            MEM.getByteArray(reservedAddress + addr, result, 0, len);
+            return result;
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public void writeI32(int addr, int data) {
-        checkBounds(addr, 4);
-        MEM.putInt(reservedAddress + addr, data);
+        try {
+            checkBounds(addr, 4);
+            MEM.putInt(reservedAddress + addr, data);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public int readInt(int addr) {
-        checkBounds(addr, 4);
-        return MEM.getInt(reservedAddress + addr);
+        try {
+            checkBounds(addr, 4);
+            return MEM.getInt(reservedAddress + addr);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public void writeLong(int addr, long data) {
-        checkBounds(addr, 8);
-        MEM.putLong(reservedAddress + addr, data);
+        try {
+            checkBounds(addr, 8);
+            MEM.putLong(reservedAddress + addr, data);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public long readLong(int addr) {
-        checkBounds(addr, 8);
-        return MEM.getLong(reservedAddress + addr);
+        try {
+            checkBounds(addr, 8);
+            return MEM.getLong(reservedAddress + addr);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public void writeShort(int addr, short data) {
-        checkBounds(addr, 2);
-        MEM.putShort(reservedAddress + addr, data);
+        try {
+            checkBounds(addr, 2);
+            MEM.putShort(reservedAddress + addr, data);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public short readShort(int addr) {
-        checkBounds(addr, 2);
-        return MEM.getShort(reservedAddress + addr);
+        try {
+            checkBounds(addr, 2);
+            return MEM.getShort(reservedAddress + addr);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
@@ -409,8 +458,12 @@ public final class JffiNativeMemory implements Memory, AutoCloseable {
 
     @Override
     public void writeByte(int addr, byte data) {
-        checkBounds(addr, 1);
-        MEM.putByte(reservedAddress + addr, data);
+        try {
+            checkBounds(addr, 1);
+            MEM.putByte(reservedAddress + addr, data);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
@@ -445,33 +498,45 @@ public final class JffiNativeMemory implements Memory, AutoCloseable {
 
     @Override
     public void zero() {
-        MEM.setMemory(reservedAddress, sizeInBytes(), (byte) 0);
+        try {
+            MEM.setMemory(reservedAddress, sizeInBytes(), (byte) 0);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public void copy(int dest, int src, int size) {
-        long limit = sizeInBytes();
-        if (Integer.toUnsignedLong(src) + Integer.toUnsignedLong(size) > limit
-                || Integer.toUnsignedLong(dest) + Integer.toUnsignedLong(size) > limit) {
-            throw new run.endive.runtime.WasmRuntimeException("out of bounds memory access");
-        }
-        // Use a temp buffer to handle overlap correctly (memmove semantics)
-        if (size > 0) {
-            byte[] temp = new byte[size];
-            MEM.getByteArray(reservedAddress + src, temp, 0, size);
-            MEM.putByteArray(reservedAddress + dest, temp, 0, size);
+        try {
+            long limit = sizeInBytes();
+            if (Integer.toUnsignedLong(src) + Integer.toUnsignedLong(size) > limit
+                    || Integer.toUnsignedLong(dest) + Integer.toUnsignedLong(size) > limit) {
+                throw outOfBounds();
+            }
+            // Use a temp buffer to handle overlap correctly (memmove semantics)
+            if (size > 0) {
+                byte[] temp = new byte[size];
+                MEM.getByteArray(reservedAddress + src, temp, 0, size);
+                MEM.putByteArray(reservedAddress + dest, temp, 0, size);
+            }
+        } finally {
+            Reference.reachabilityFence(this);
         }
     }
 
     @Override
     public void fill(byte value, int fromIndex, int toIndex) {
-        long limit = sizeInBytes();
-        if (Integer.toUnsignedLong(fromIndex) > limit
-                || Integer.toUnsignedLong(toIndex) > limit
-                || fromIndex > toIndex) {
-            throw new run.endive.runtime.WasmRuntimeException("out of bounds memory access");
+        try {
+            long limit = sizeInBytes();
+            if (Integer.toUnsignedLong(fromIndex) > limit
+                    || Integer.toUnsignedLong(toIndex) > limit
+                    || fromIndex > toIndex) {
+                throw outOfBounds();
+            }
+            MEM.setMemory(reservedAddress + fromIndex, toIndex - fromIndex, value);
+        } finally {
+            Reference.reachabilityFence(this);
         }
-        MEM.setMemory(reservedAddress + fromIndex, toIndex - fromIndex, value);
     }
 
     @Override
@@ -483,193 +548,321 @@ public final class JffiNativeMemory implements Memory, AutoCloseable {
 
     @Override
     public int atomicReadInt(int addr) {
-        checkBounds(addr, 4);
-        return atomics.readInt(addr);
+        try {
+            checkBounds(addr, 4);
+            return atomics.readInt(addr);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public long atomicReadLong(int addr) {
-        checkBounds(addr, 8);
-        return atomics.readLong(addr);
+        try {
+            checkBounds(addr, 8);
+            return atomics.readLong(addr);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public short atomicReadShort(int addr) {
-        checkBounds(addr, 2);
-        return atomics.readShort(addr);
+        try {
+            checkBounds(addr, 2);
+            return atomics.readShort(addr);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public byte atomicReadByte(int addr) {
-        checkBounds(addr, 1);
-        return atomics.readByte(addr);
+        try {
+            checkBounds(addr, 1);
+            return atomics.readByte(addr);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public void atomicWriteInt(int addr, int value) {
-        checkBounds(addr, 4);
-        atomics.writeInt(addr, value);
+        try {
+            checkBounds(addr, 4);
+            atomics.writeInt(addr, value);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public void atomicWriteLong(int addr, long value) {
-        checkBounds(addr, 8);
-        atomics.writeLong(addr, value);
+        try {
+            checkBounds(addr, 8);
+            atomics.writeLong(addr, value);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public void atomicWriteShort(int addr, short value) {
-        checkBounds(addr, 2);
-        atomics.writeShort(addr, value);
+        try {
+            checkBounds(addr, 2);
+            atomics.writeShort(addr, value);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public void atomicWriteByte(int addr, byte value) {
-        checkBounds(addr, 1);
-        atomics.writeByte(addr, value);
+        try {
+            checkBounds(addr, 1);
+            atomics.writeByte(addr, value);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public int atomicAddInt(int addr, int delta) {
-        checkBounds(addr, 4);
-        return atomics.addInt(addr, delta);
+        try {
+            checkBounds(addr, 4);
+            return atomics.addInt(addr, delta);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public int atomicAndInt(int addr, int mask) {
-        checkBounds(addr, 4);
-        return atomics.andInt(addr, mask);
+        try {
+            checkBounds(addr, 4);
+            return atomics.andInt(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public int atomicOrInt(int addr, int mask) {
-        checkBounds(addr, 4);
-        return atomics.orInt(addr, mask);
+        try {
+            checkBounds(addr, 4);
+            return atomics.orInt(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public int atomicXorInt(int addr, int mask) {
-        checkBounds(addr, 4);
-        return atomics.xorInt(addr, mask);
+        try {
+            checkBounds(addr, 4);
+            return atomics.xorInt(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public int atomicXchgInt(int addr, int value) {
-        checkBounds(addr, 4);
-        return atomics.xchgInt(addr, value);
+        try {
+            checkBounds(addr, 4);
+            return atomics.xchgInt(addr, value);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public int atomicCmpxchgInt(int addr, int expected, int replacement) {
-        checkBounds(addr, 4);
-        return atomics.cmpxchgInt(addr, expected, replacement);
+        try {
+            checkBounds(addr, 4);
+            return atomics.cmpxchgInt(addr, expected, replacement);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public long atomicAddLong(int addr, long delta) {
-        checkBounds(addr, 8);
-        return atomics.addLong(addr, delta);
+        try {
+            checkBounds(addr, 8);
+            return atomics.addLong(addr, delta);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public long atomicAndLong(int addr, long mask) {
-        checkBounds(addr, 8);
-        return atomics.andLong(addr, mask);
+        try {
+            checkBounds(addr, 8);
+            return atomics.andLong(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public long atomicOrLong(int addr, long mask) {
-        checkBounds(addr, 8);
-        return atomics.orLong(addr, mask);
+        try {
+            checkBounds(addr, 8);
+            return atomics.orLong(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public long atomicXorLong(int addr, long mask) {
-        checkBounds(addr, 8);
-        return atomics.xorLong(addr, mask);
+        try {
+            checkBounds(addr, 8);
+            return atomics.xorLong(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public long atomicXchgLong(int addr, long value) {
-        checkBounds(addr, 8);
-        return atomics.xchgLong(addr, value);
+        try {
+            checkBounds(addr, 8);
+            return atomics.xchgLong(addr, value);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public long atomicCmpxchgLong(int addr, long expected, long replacement) {
-        checkBounds(addr, 8);
-        return atomics.cmpxchgLong(addr, expected, replacement);
+        try {
+            checkBounds(addr, 8);
+            return atomics.cmpxchgLong(addr, expected, replacement);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public short atomicAddShort(int addr, short delta) {
-        checkBounds(addr, 2);
-        return atomics.addShort(addr, delta);
+        try {
+            checkBounds(addr, 2);
+            return atomics.addShort(addr, delta);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public short atomicAndShort(int addr, short mask) {
-        checkBounds(addr, 2);
-        return atomics.andShort(addr, mask);
+        try {
+            checkBounds(addr, 2);
+            return atomics.andShort(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public short atomicOrShort(int addr, short mask) {
-        checkBounds(addr, 2);
-        return atomics.orShort(addr, mask);
+        try {
+            checkBounds(addr, 2);
+            return atomics.orShort(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public short atomicXorShort(int addr, short mask) {
-        checkBounds(addr, 2);
-        return atomics.xorShort(addr, mask);
+        try {
+            checkBounds(addr, 2);
+            return atomics.xorShort(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public short atomicXchgShort(int addr, short value) {
-        checkBounds(addr, 2);
-        return atomics.xchgShort(addr, value);
+        try {
+            checkBounds(addr, 2);
+            return atomics.xchgShort(addr, value);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public short atomicCmpxchgShort(int addr, short expected, short replacement) {
-        checkBounds(addr, 2);
-        return atomics.cmpxchgShort(addr, expected, replacement);
+        try {
+            checkBounds(addr, 2);
+            return atomics.cmpxchgShort(addr, expected, replacement);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public byte atomicAddByte(int addr, byte delta) {
-        checkBounds(addr, 1);
-        return atomics.addByte(addr, delta);
+        try {
+            checkBounds(addr, 1);
+            return atomics.addByte(addr, delta);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public byte atomicAndByte(int addr, byte mask) {
-        checkBounds(addr, 1);
-        return atomics.andByte(addr, mask);
+        try {
+            checkBounds(addr, 1);
+            return atomics.andByte(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public byte atomicOrByte(int addr, byte mask) {
-        checkBounds(addr, 1);
-        return atomics.orByte(addr, mask);
+        try {
+            checkBounds(addr, 1);
+            return atomics.orByte(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public byte atomicXorByte(int addr, byte mask) {
-        checkBounds(addr, 1);
-        return atomics.xorByte(addr, mask);
+        try {
+            checkBounds(addr, 1);
+            return atomics.xorByte(addr, mask);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public byte atomicXchgByte(int addr, byte value) {
-        checkBounds(addr, 1);
-        return atomics.xchgByte(addr, value);
+        try {
+            checkBounds(addr, 1);
+            return atomics.xchgByte(addr, value);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     @Override
     public byte atomicCmpxchgByte(int addr, byte expected, byte replacement) {
-        checkBounds(addr, 1);
-        return atomics.cmpxchgByte(addr, expected, replacement);
+        try {
+            checkBounds(addr, 1);
+            return atomics.cmpxchgByte(addr, expected, replacement);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 }

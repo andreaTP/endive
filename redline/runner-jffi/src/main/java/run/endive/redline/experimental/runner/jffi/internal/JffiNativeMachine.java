@@ -13,10 +13,12 @@ import com.kenai.jffi.MemoryIO;
 import com.kenai.jffi.PageManager;
 import com.kenai.jffi.Type;
 import java.lang.ref.Reference;
+import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import run.endive.redline.experimental.api.NativeCode;
 import run.endive.redline.experimental.api.internal.CtxBuffer;
@@ -100,39 +102,63 @@ public final class JffiNativeMachine implements Machine {
     private final long funcTableAddr;
     private final long funcTableSize; // byte size
     private final long argsBufferAddr;
+    // null without globals; separate, so a global bound to it keeps only the buffer alive
+    private final JffiGlobalsBuffer globals;
     private final long globalsBufferAddr;
     private final long funcTypesArrayAddr;
     private final long funcTypesArraySize; // byte size
     private final long ownerId = OWNER_IDS.incrementAndGet();
-    private long tablePtrsArrayAddr;
-    private long tableWritersAddr;
-    private JffiNativeTable[] nativeTables;
-    private boolean[] ownsTable;
+    private final long tablePtrsArrayAddr;
+    private final long tableWritersAddr;
+    private volatile JffiNativeTable[] nativeTables;
     private boolean tablesInitialized;
-    private boolean ownsMemory;
-    private boolean closed;
+    private volatile boolean closed;
     private final int numImports;
+    private final int importGlobalCount;
     private final int globalCount;
+    private int definedGlobalsBound;
     private boolean importGlobalsInitialized;
     private long cachedMemBase;
     private boolean memBaseInitialized;
-    private JffiNativeMemory nativeMemory;
     private volatile Throwable pendingException;
     // the machine whose outermost call is running on this thread
     private static final ThreadLocal<JffiNativeMachine> RUNNING = new ThreadLocal<>();
-    private int callDepth;
+    // calls under way, to tell the outermost one
+    private final AtomicInteger callDepth = new AtomicInteger();
     private final InterruptWatchdog.InterruptSink interruptFlag = this::raiseInterruptFlag;
 
-    // Keep closure handles alive to prevent GC
+    // Closure handles the compiled code calls; their closures reach this machine weakly
     private final Closure.Handle trampolineHandle;
     private final Closure.Handle memGrowHandle;
     private final Closure.Handle[] importHandles;
 
-    public JffiNativeMachine(
-            Instance instance,
-            List<JffiNativeTable> sharedTables,
-            long sharedGlobalsBufferAddr,
-            NativeCode precompiledCode) {
+    // native frees, newest first, handed to the cleaner once construction succeeds
+    private final ArrayDeque<Runnable> frees;
+
+    /**
+     * Builds the machine. Its native state is freed once nothing reaches it, or right away
+     * if building it fails.
+     */
+    public static JffiNativeMachine create(Instance instance, NativeCode precompiledCode) {
+        var frees = new ArrayDeque<Runnable>();
+        JffiNativeMachine machine;
+        try {
+            machine = new JffiNativeMachine(instance, precompiledCode, frees);
+        } catch (RuntimeException | Error e) {
+            var failure = runFrees(frees, null);
+            if (failure != null) {
+                e.addSuppressed(failure);
+            }
+            throw e;
+        }
+        // the constructor allocated everything, so the list is complete
+        JffiCleaner.register(machine, frees.toArray(new Runnable[0]));
+        return machine;
+    }
+
+    private JffiNativeMachine(
+            Instance instance, NativeCode precompiledCode, ArrayDeque<Runnable> frees) {
+        this.frees = frees;
         this.instance = instance;
         var module = instance.module();
         NativeCode code = NativeCodeCheck.check(precompiledCode, module);
@@ -151,34 +177,37 @@ public final class JffiNativeMachine implements Machine {
         this.importHandles = new Closure.Handle[numImports];
 
         // Allocate call context buffer
-        ctxBufferAddr = MEM.allocateMemory(CTX_SIZE, true);
+        ctxBufferAddr = allocate(CTX_SIZE);
 
         // Allocate function pointer table (one i64 per function)
         this.funcTableSize = (long) totalFuncs * 8;
-        funcTableAddr = MEM.allocateMemory(funcTableSize, true);
+        funcTableAddr = allocate(funcTableSize);
 
-        // Globals buffer from factory
-        this.globalsBufferAddr = sharedGlobalsBufferAddr;
-        this.globalCount =
+        // One slot per global, imported or defined, which bind() moves them onto
+        this.importGlobalCount =
                 (int)
-                                module.importSection().stream()
-                                        .filter(
-                                                i ->
-                                                        i.importType()
-                                                                == run.endive.wasm.types
-                                                                        .ExternalType.GLOBAL)
-                                        .count()
+                        module.importSection().stream()
+                                .filter(
+                                        i ->
+                                                i.importType()
+                                                        == run.endive.wasm.types.ExternalType
+                                                                .GLOBAL)
+                                .count();
+        this.globalCount =
+                importGlobalCount
                         + (module.globalSection() != null
                                 ? module.globalSection().globalCount()
                                 : 0);
+        this.globals = globalCount > 0 ? new JffiGlobalsBuffer(globalCount) : null;
+        this.globalsBufferAddr = globals == null ? 0L : globals.address();
 
         // Allocate args buffer
-        this.argsBufferAddr = MEM.allocateMemory((long) CtxBuffer.ARGS_BUFFER_CAPACITY * 8, true);
+        this.argsBufferAddr = allocate((long) CtxBuffer.ARGS_BUFFER_CAPACITY * 8);
 
         // Allocate funcTypes array with canonical type indices
         int[] canonicalTypeMap = TypeMapUtils.buildCanonicalTypeMap(module);
         this.funcTypesArraySize = (long) totalFuncs * 4;
-        this.funcTypesArrayAddr = MEM.allocateMemory(funcTypesArraySize, true);
+        this.funcTypesArrayAddr = allocate(funcTypesArraySize);
         for (int i = 0; i < numImports; i++) {
             int rawType = instance.functionType(i);
             MEM.putInt(funcTypesArrayAddr + (long) i * 4, canonicalTypeMap[rawType]);
@@ -189,18 +218,22 @@ public final class JffiNativeMachine implements Machine {
             MEM.putInt(funcTypesArrayAddr + (long) funcId * 4, canonicalTypeMap[rawType]);
         }
 
-        // Tables: populated lazily
+        // Tables are created after the machine, so their addresses are filled in on the
+        // first call; the arrays are allocated now, so nothing is freed late
+        int tableCount = instance.imports().tableCount() + module.tableSection().tableCount();
         this.nativeTables = null;
-        this.tablePtrsArrayAddr = 0;
+        this.tablePtrsArrayAddr = tableCount > 0 ? allocate((long) tableCount * 8) : 0L;
+        this.tableWritersAddr = tableCount > 0 ? allocate((long) tableCount * 4) : 0L;
         this.tablesInitialized = false;
 
         // Host stubs are called by compiled code with the platform ABI
-        this.trampolineHandle = createTrampolineStub();
-        this.memGrowHandle = createMemGrowStub();
+        var upcalls = new Upcalls(this);
+        this.trampolineHandle = track(createTrampolineStub(upcalls));
+        this.memGrowHandle = track(createMemGrowStub(upcalls));
         for (int funcId = 0; funcId < numImports; funcId++) {
             var funcType = instance.imports().function(funcId).functionType();
             funcTypes[funcId] = funcType;
-            importHandles[funcId] = createImportStub(funcId, funcType);
+            importHandles[funcId] = track(createImportStub(upcalls, funcId, funcType));
         }
 
         // Write pointers to ctxBuffer
@@ -225,6 +258,9 @@ public final class JffiNativeMachine implements Machine {
         if (codeRegionAddr == 0 || codeRegionAddr == -1) {
             throw new WasmEngineException("Failed to allocate executable code pages");
         }
+        long codeAddr = codeRegionAddr;
+        int codePages = codeRegionOsPages;
+        frees.push(() -> PM.freePages(codeAddr, codePages));
 
         try {
             MEM.putByteArray(codeRegionAddr, image, 0, image.length);
@@ -271,19 +307,65 @@ public final class JffiNativeMachine implements Machine {
         } catch (Throwable e) {
             throw new WasmEngineException("Failed to set up native code", e);
         }
+    }
 
-        this.nativeMemory =
-                instance.memory() instanceof JffiNativeMemory
-                        ? (JffiNativeMemory) instance.memory()
-                        : null;
-        // An imported memory outlives this instance and may back others, so only
-        // a memory this module defines is ours to close.
-        this.ownsMemory = instance.imports().memoryCount() == 0;
+    private long allocate(long size) {
+        long address = MEM.allocateMemory(size, true);
+        if (address == 0) {
+            throw new OutOfMemoryError("Failed to allocate " + size + " native bytes");
+        }
+        frees.push(() -> MEM.freeMemory(address));
+        return address;
+    }
+
+    private Closure.Handle track(Closure.Handle handle) {
+        // a disposed slot is reused by other instances, so it goes with the code
+        frees.push(handle::dispose);
+        return handle;
+    }
+
+    // Runs every free, newest first, even when one of them fails.
+    private static RuntimeException runFrees(ArrayDeque<Runnable> frees, RuntimeException failure) {
+        while (!frees.isEmpty()) {
+            try {
+                frees.pop().run();
+            } catch (RuntimeException e) {
+                failure = addFailure(failure, e);
+            }
+        }
+        return failure;
+    }
+
+    private static RuntimeException addFailure(RuntimeException first, RuntimeException next) {
+        if (first == null) {
+            return next;
+        }
+        first.addSuppressed(next);
+        return first;
+    }
+
+    /** Binds a global this module defines to its slot, as the instance creates it. */
+    void bindDefinedGlobal(JffiNativeGlobalInstance global) {
+        if (closed) {
+            throw new IllegalStateException("This instance has been closed");
+        }
+        int slot = importGlobalCount + definedGlobalsBound;
+        if (slot >= globalCount) {
+            throw new IllegalStateException(
+                    "A natively compiled instance can only be initialized once");
+        }
+        definedGlobalsBound++;
+        global.bind(globals, slot, this);
     }
 
     /** Returns the id that the table entries this machine owns hold. */
     long ownerId() {
         return ownerId;
+    }
+
+    /** Whether a call is running on this machine, on any thread. */
+    boolean isRunning() {
+        return callDepth.get() > 0;
     }
 
     boolean isClosed() {
@@ -295,42 +377,13 @@ public final class JffiNativeMachine implements Machine {
         return instance;
     }
 
+    /**
+     * Stops the instance: calls that start from now on throw. A call already running
+     * finishes. The native state is freed once nothing reaches this machine.
+     */
     @Override
     public void close() {
-        if (closed) {
-            // Every free below is a native one, so a second close would be a
-            // double free rather than a no-op.
-            return;
-        }
         closed = true;
-        if (ownsTable != null) {
-            for (int i = 0; i < ownsTable.length; i++) {
-                if (ownsTable[i]) {
-                    nativeTables[i].free();
-                }
-            }
-        }
-        if (nativeMemory != null && ownsMemory) {
-            nativeMemory.close();
-        }
-        if (tablePtrsArrayAddr != 0) {
-            MEM.freeMemory(tablePtrsArrayAddr);
-            MEM.freeMemory(tableWritersAddr);
-        }
-        trampolineHandle.dispose();
-        memGrowHandle.dispose();
-        for (Closure.Handle h : importHandles) {
-            if (h != null) {
-                h.dispose();
-            }
-        }
-        if (codeRegionOsPages > 0 && codeRegionAddr != 0) {
-            PM.freePages(codeRegionAddr, codeRegionOsPages);
-        }
-        MEM.freeMemory(ctxBufferAddr);
-        MEM.freeMemory(funcTableAddr);
-        MEM.freeMemory(argsBufferAddr);
-        MEM.freeMemory(funcTypesArrayAddr);
     }
 
     @SuppressWarnings("unchecked")
@@ -389,7 +442,8 @@ public final class JffiNativeMachine implements Machine {
 
     // --- Import upcall stubs ---
 
-    private Closure.Handle createImportStub(int funcId, FunctionType funcType) {
+    private static Closure.Handle createImportStub(
+            Upcalls upcalls, int funcId, FunctionType funcType) {
         var paramTypes = new ArrayList<Type>();
         paramTypes.add(Type.POINTER); // memBase
         paramTypes.add(Type.POINTER); // ctxPtr
@@ -412,7 +466,7 @@ public final class JffiNativeMachine implements Machine {
         final FunctionType ft = funcType;
         Closure closure =
                 (Closure.Buffer buf) -> {
-                    long result = importDispatchDirect(fId);
+                    long result = upcalls.importDispatchDirect(fId);
                     setClosureReturn(buf, result, ft);
                 };
 
@@ -487,11 +541,11 @@ public final class JffiNativeMachine implements Machine {
 
     // --- CALL_INDIRECT trampoline ---
 
-    private Closure.Handle createTrampolineStub() {
+    private static Closure.Handle createTrampolineStub(Upcalls upcalls) {
         Closure closure =
                 (Closure.Buffer buf) -> {
                     long ctxAddr = buf.getLong(0);
-                    long result = callIndirectTrampoline(ctxAddr);
+                    long result = upcalls.callIndirectTrampoline(ctxAddr);
                     buf.setLongReturn(result);
                 };
 
@@ -627,8 +681,12 @@ public final class JffiNativeMachine implements Machine {
             case -6:
                 { // first native table.set into a table
                     int tblIdx = (int) MEM.getLong(argsBufferAddr + CtxBuffer.argOffset(0));
-                    nativeTables[tblIdx].registerWriter(this);
-                    MEM.putInt(tableWritersAddr + (long) tblIdx * 4, 1);
+                    var table = nativeTables[tblIdx];
+                    // under the table's lock, so a prune can't drop this machine in between
+                    synchronized (table) {
+                        table.registerWriter(this);
+                        MEM.putInt(tableWritersAddr + (long) tblIdx * 4, 1);
+                    }
                     break;
                 }
             case -8:
@@ -692,11 +750,11 @@ public final class JffiNativeMachine implements Machine {
 
     // --- Memory grow upcall stub ---
 
-    private Closure.Handle createMemGrowStub() {
+    private static Closure.Handle createMemGrowStub(Upcalls upcalls) {
         Closure closure =
                 (Closure.Buffer buf) -> {
                     long ctxAddr = buf.getLong(0);
-                    long result = memoryGrowHandler(ctxAddr);
+                    long result = upcalls.memoryGrowHandler(ctxAddr);
                     buf.setLongReturn(result);
                 };
 
@@ -760,10 +818,10 @@ public final class JffiNativeMachine implements Machine {
                 throw new WasmEngineException(foreignImportMessage("global", global));
             }
             var nativeGlobal = (JffiNativeGlobalInstance) global;
-            if (nativeGlobal.isStandalone()) {
+            if (nativeGlobal.isAdoptable()) {
                 // Passed in by the host: adopt it, so what this module writes stays
                 // visible through the caller's own object.
-                nativeGlobal.rebind(globalsBufferAddr, i);
+                nativeGlobal.bind(globals, i, this);
             } else {
                 // Exported by another module, and already sitting where that
                 // module's compiled code reads it. Its storage cannot move, so this
@@ -793,17 +851,6 @@ public final class JffiNativeMachine implements Machine {
             tables[i] = (JffiNativeTable) table;
         }
 
-        // A table this module defines came from our factory and dies with
-        // the instance. An imported one belongs to whoever created it.
-        boolean[] owned = new boolean[tableCount];
-        for (int i = importedTableCount; i < tableCount; i++) {
-            owned[i] = true;
-        }
-        this.ownsTable = owned;
-        if (tableCount > 0 && tablePtrsArrayAddr == 0) {
-            this.tablePtrsArrayAddr = MEM.allocateMemory((long) tableCount * 8, true);
-            this.tableWritersAddr = MEM.allocateMemory((long) tableCount * 4, true);
-        }
         for (int i = 0; i < tableCount; i++) {
             tables[i].resolvePendingRefs(instance);
             MEM.putLong(tablePtrsArrayAddr + (long) i * 8, tables[i].nativeBufferAddress());
@@ -814,6 +861,52 @@ public final class JffiNativeMachine implements Machine {
             MEM.putLong(ctxBufferAddr + CtxBuffer.TABLE_WRITERS_PTR, tableWritersAddr);
         }
         tablesInitialized = true;
+    }
+
+    /** Clears the flag that stops native table.set registering this machine with {@code table}. */
+    void forgetTableWriter(JffiNativeTable table) {
+        var tables = nativeTables;
+        if (tables == null) {
+            return;
+        }
+        try {
+            for (int i = 0; i < tables.length; i++) {
+                if (tables[i] == table) {
+                    MEM.putInt(tableWritersAddr + (long) i * 4, 0);
+                }
+            }
+        } finally {
+            Reference.reachabilityFence(this);
+        }
+    }
+
+    /**
+     * What the closures call. jffi keeps each closure from a JNI global ref, so the closure
+     * reaches the machine weakly: its code, and so every upcall, only runs inside call(),
+     * which keeps the machine reachable.
+     */
+    private static final class Upcalls {
+        private final WeakReference<JffiNativeMachine> machine;
+
+        Upcalls(JffiNativeMachine machine) {
+            this.machine = new WeakReference<>(machine);
+        }
+
+        // 0 when the machine is gone, which no running code can observe
+        long importDispatchDirect(int funcId) {
+            var m = machine.get();
+            return m == null ? 0L : m.importDispatchDirect(funcId);
+        }
+
+        long callIndirectTrampoline(long ctxAddr) {
+            var m = machine.get();
+            return m == null ? 0L : m.callIndirectTrampoline(ctxAddr);
+        }
+
+        long memoryGrowHandler(long ctxAddr) {
+            var m = machine.get();
+            return m == null ? -1L : m.memoryGrowHandler(ctxAddr);
+        }
     }
 
     /** Returns how many functions, imported and defined, this machine's function table holds. */
@@ -970,7 +1063,6 @@ public final class JffiNativeMachine implements Machine {
     @Override
     public long[] call(int funcId, long[] args) throws WasmEngineException {
         if (closed) {
-            // Its native code and buffers are gone, but a table may still hold its functions
             throw new WasmEngineException("instance is closed");
         }
         if (funcId < numImports) {
@@ -980,12 +1072,11 @@ public final class JffiNativeMachine implements Machine {
         }
 
         var funcType = funcTypes[funcId];
-        long funcAddr = MEM.getLong(funcTableAddr + (long) funcId * 8);
         if (entryTrampolines[funcId] == null) {
             throw new WasmEngineException("Function " + funcId + " not compiled");
         }
 
-        boolean outermostCall = callDepth++ == 0;
+        boolean outermostCall = callDepth.incrementAndGet() == 1;
         // a nested instance shares the stack budget of the one running on this thread
         JffiNativeMachine outer = null;
         if (outermostCall) {
@@ -993,6 +1084,7 @@ public final class JffiNativeMachine implements Machine {
             RUNNING.set(this);
         }
         try {
+            long funcAddr = MEM.getLong(funcTableAddr + (long) funcId * 8);
             initializeImportGlobals();
             initializeNativeTables();
 
@@ -1097,10 +1189,9 @@ public final class JffiNativeMachine implements Machine {
                     RUNNING.set(outer);
                 }
             }
-            callDepth--;
-            // Prevent the JIT from considering this machine unreachable during
-            // the native call, which would let GC collect and close() free
-            // native memory while code is executing.
+            callDepth.decrementAndGet();
+            // Keeps this machine, and so its code, closures and buffers, reachable for the
+            // whole native call: the closures only hold it weakly.
             Reference.reachabilityFence(this);
         }
     }

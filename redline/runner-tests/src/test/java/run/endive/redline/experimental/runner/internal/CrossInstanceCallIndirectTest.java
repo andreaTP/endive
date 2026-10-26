@@ -616,6 +616,39 @@ public class CrossInstanceCallIndirectTest {
         }
     }
 
+    /**
+     * A table drops a writer none of its entries names any more, which must then register
+     * again on its next native table.set, or the entry would name an owner the table lost.
+     */
+    @Test
+    public void aPrunedWriterRegistersAgain() {
+        var store = new Store();
+        try (var holder = nativeInstance(HOLDER, store)) {
+            store.register("holder", holder);
+            try (var setter =
+                    nativeInstance(
+                            """
+                            (module
+                              (import "holder" "tab" (table 2 funcref))
+                              (global $g i32 (i32.const 42))
+                              (func $answer (result i32) global.get $g)
+                              (elem declare func $answer)
+                              (func (export "set") (param i32)
+                                (table.set (local.get 0) (ref.func $answer))))
+                            """,
+                            store)) {
+                setter.export("set").apply(0);
+                // enough writers over the same entry for the table to prune the setter
+                for (int i = 0; i < 20; i++) {
+                    nativeInstance(WRITER, store);
+                }
+                setter.export("set").apply(0);
+                assertEquals(42, call(holder, "call", 0));
+                assertSame(setter, holder.table(0).instance(0));
+            }
+        }
+    }
+
     /** An image may leave functions out, which a table must not jump to. */
     @Test
     public void uncompiledFunctionIsNotCalled() {
