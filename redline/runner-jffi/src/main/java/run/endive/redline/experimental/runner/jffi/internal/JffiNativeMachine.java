@@ -1,6 +1,7 @@
 package run.endive.redline.experimental.runner.jffi.internal;
 
 import com.kenai.jffi.CallContext;
+import com.kenai.jffi.CallContextCache;
 import com.kenai.jffi.CallingConvention;
 import com.kenai.jffi.Closure;
 import com.kenai.jffi.ClosureManager;
@@ -532,7 +533,13 @@ public final class JffiNativeMachine implements Machine {
             returnType = valTypeToJffiType(funcType.returns().get(0));
         }
 
-        return new CallContext(returnType, paramTypes.toArray(new Type[0]));
+        // jffi never frees a context it hands out, so share one per signature
+        return CallContextCache.getInstance()
+                .getCallContext(
+                        returnType,
+                        paramTypes.toArray(new Type[0]),
+                        CallingConvention.DEFAULT,
+                        true);
     }
 
     // --- Import upcall stubs ---
@@ -961,6 +968,12 @@ public final class JffiNativeMachine implements Machine {
     /** Returns how many functions, imported and defined, this machine's function table holds. */
     int functionCount() {
         return (int) (funcTableSize / 8);
+    }
+
+    /** Returns the call context of {@code funcId}'s entry trampoline, or null if not compiled. */
+    CallContext entryCallContext(int funcId) {
+        var trampoline = entryTrampolines[funcId];
+        return trampoline == null ? null : trampoline.getCallContext();
     }
 
     /** Package-private: used by JffiNativeTable to resolve funcId → funcPtr. */
