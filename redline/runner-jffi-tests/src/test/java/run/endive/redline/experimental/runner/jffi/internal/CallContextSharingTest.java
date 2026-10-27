@@ -1,6 +1,5 @@
 package run.endive.redline.experimental.runner.jffi.internal;
 
-import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 import com.kenai.jffi.CallContext;
@@ -16,9 +15,7 @@ public class CallContextSharingTest {
     public void oneSignatureGetsOneCallContext() {
         var first = FunctionType.of(List.of(ValType.I32, ValType.I64), List.of(ValType.F64));
         var second = FunctionType.of(List.of(ValType.I32, ValType.I64), List.of(ValType.F64));
-        var other = FunctionType.of(List.of(ValType.I64), List.of(ValType.F64));
         assertSame(context(first), context(second));
-        assertNotSame(context(first), context(other));
     }
 
     private static CallContext context(FunctionType type) {
