@@ -109,7 +109,15 @@ public final class JffiNativeMemory implements Memory {
     }
 
     private static boolean protectReadWrite(long addr, long osPages) {
-        int prot = PageManager.PROT_READ | PageManager.PROT_WRITE;
+        return protect(addr, osPages, PageManager.PROT_READ | PageManager.PROT_WRITE);
+    }
+
+    /** Changes the protection of {@code osPages} pages. Windows doesn't report a failure. */
+    static boolean protect(long addr, long osPages, int prot) {
+        if (IS_WINDOWS) {
+            PM.protectPages(addr, (int) osPages, prot);
+            return true;
+        }
         long size = osPages * PM.pageSize();
         return (int) INV.invokeN3(MPROTECT_CTX, MPROTECT_ADDR, addr, size, prot) == 0;
     }

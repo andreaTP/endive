@@ -278,10 +278,12 @@ public final class JffiNativeMachine implements Machine {
                 MEM.putByteArray(
                         codeRegionAddr + code.importStubSlotOffset(funcId), stubAddress, 0, 8);
             }
-            PM.protectPages(
+            if (!JffiNativeMemory.protect(
                     codeRegionAddr,
                     codeRegionOsPages,
-                    PageManager.PROT_READ | PageManager.PROT_EXEC);
+                    PageManager.PROT_READ | PageManager.PROT_EXEC)) {
+                throw new WasmEngineException("Failed to make native code executable");
+            }
 
             // Compiled code reaches imports through their trampolines
             for (int funcId = 0; funcId < numImports; funcId++) {

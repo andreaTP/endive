@@ -140,7 +140,9 @@ closed or gone. A table also keeps alive every instance whose functions it holds
 - The garbage collector doesn't count native memory as heap. Redline counts what it holds (code,
   linear memory and tables) and calls `System.gc()` once that has grown by as much as it was at
   its last low point, and by at least 256 MiB: set `-Dendive.redline.gcThreshold=<bytes>` to
-  change that minimum.
+  change that minimum. That count leaves out address space: a memory without a declared maximum
+  reserves 2 GiB of it, so under a limit such as `ulimit -v`, declare a maximum or drop instances
+  sooner.
 - With G1 or Parallel GC, `System.gc()` is a full stop-the-world collection on the thread that
   allocates; `-XX:+ExplicitGCInvokesConcurrent` makes it concurrent. With
   `-XX:+DisableExplicitGC`, an instance you no longer reference holds its native memory until a
