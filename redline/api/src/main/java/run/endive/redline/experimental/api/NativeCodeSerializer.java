@@ -63,7 +63,12 @@ public final class NativeCodeSerializer {
         }
         int version = dis.readInt();
         if (version != VERSION) {
-            throw new IOException("Unsupported native code version: " + version);
+            throw new IOException(
+                    "Native code version "
+                            + version
+                            + " is not supported, this Redline reads version "
+                            + VERSION
+                            + ": compile the module again");
         }
         String triple = dis.readUTF();
         byte[] image = readBytes(dis, readCount(dis, "image length"), "image");
