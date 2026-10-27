@@ -638,9 +638,16 @@ public final class NativeMachine implements Machine {
                 int newSize = (int) argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(1));
                 int fillValue = (int) argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(2));
                 int tblIdx = (int) argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(4));
-                nativeTables[tblIdx].fill(oldSize, newSize, fillValue, instance);
-                // Update TableLimits so import validation sees the grown size
-                nativeTables[tblIdx].limits().grow(newSize - oldSize);
+                var table = nativeTables[tblIdx];
+                // compiled code has already grown it, so import validation sees the new size
+                table.limits().grow(newSize - oldSize);
+                try {
+                    table.fill(oldSize, newSize, fillValue, instance);
+                } catch (RuntimeException e) {
+                    // null, so a call through a slot left unwritten traps instead of running
+                    table.fill(oldSize, newSize, Value.REF_NULL_VALUE, instance);
+                    throw e;
+                }
             }
             case -2 -> { // table fill
                 int offset = (int) argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(0));

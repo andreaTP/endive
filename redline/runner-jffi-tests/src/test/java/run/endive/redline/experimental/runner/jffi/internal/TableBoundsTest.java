@@ -46,6 +46,18 @@ public class TableBoundsTest {
                     + "  (func (export \"copy\")\n"
                     + "    (table.set $own (i32.const 0) (table.get 0 (i32.const 0)))))\n";
 
+    /** Grows its own table with the owner's entry, then calls through a grown slot. */
+    private static final String FOREIGN_GROWER =
+            "(module\n"
+                    + "  (import \"owner\" \"tab\" (table 1 funcref))\n"
+                    + "  (table $own 1 funcref)\n"
+                    + "  (type $void (func))\n"
+                    + "  (func $local)\n"
+                    + "  (func (export \"grow\") (result i32)\n"
+                    + "    (table.grow $own (table.get 0 (i32.const 0)) (i32.const 2)))\n"
+                    + "  (func (export \"callGrown\")\n"
+                    + "    (call_indirect $own (type $void) (i32.const 1))))\n";
+
     @Test
     public void nativeGrowStopsAtTheBuffer() {
         try (var instance = nativeInstance(GROWER, new Store())) {
@@ -85,6 +97,22 @@ public class TableBoundsTest {
                         assertThrows(
                                 WasmEngineException.class, () -> copier.export("copy").apply());
                 assertTrue(e.getMessage().contains("undefined element"), e.getMessage());
+            }
+        }
+    }
+
+    @Test
+    public void aGrowWhoseFillFailsLeavesNullEntries() {
+        var store = new Store();
+        try (var owner = nativeInstance(OWNER, store)) {
+            store.register("owner", owner);
+            try (var grower = nativeInstance(FOREIGN_GROWER, store)) {
+                var e =
+                        assertThrows(
+                                WasmEngineException.class, () -> grower.export("grow").apply());
+                assertTrue(e.getMessage().contains("undefined element"), e.getMessage());
+                // an unwritten slot would run $local instead
+                assertThrows(WasmEngineException.class, () -> grower.export("callGrown").apply());
             }
         }
     }

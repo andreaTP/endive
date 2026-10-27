@@ -644,8 +644,16 @@ public final class JffiNativeMachine implements Machine {
                     int newSize = (int) MEM.getLong(argsBufferAddr + CtxBuffer.argOffset(1));
                     int fillValue = (int) MEM.getLong(argsBufferAddr + CtxBuffer.argOffset(2));
                     int tblIdx = (int) MEM.getLong(argsBufferAddr + CtxBuffer.argOffset(4));
-                    nativeTables[tblIdx].fill(oldSize, newSize, fillValue, instance);
-                    nativeTables[tblIdx].limits().grow(newSize - oldSize);
+                    var table = nativeTables[tblIdx];
+                    // compiled code has already grown it, so import validation sees the new size
+                    table.limits().grow(newSize - oldSize);
+                    try {
+                        table.fill(oldSize, newSize, fillValue, instance);
+                    } catch (RuntimeException e) {
+                        // null, so a call through a slot left unwritten traps instead of running
+                        table.fill(oldSize, newSize, Value.REF_NULL_VALUE, instance);
+                        throw e;
+                    }
                     break;
                 }
             case -2:
