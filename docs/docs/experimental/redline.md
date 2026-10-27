@@ -133,7 +133,9 @@ try (var instance = MyModule.builder().build()) {
 A natively compiled instance keeps its code, linear memory and tables outside the Java heap. The
 garbage collector frees them once nothing references them: closing is optional, and a memory,
 table or global keeps working for as long as you hold it, even after the instance that made it is
-closed or gone. A table also keeps alive every instance whose functions it holds.
+closed or gone. A table also keeps alive every instance whose functions it holds. It finds the
+ones it no longer holds only when a new instance starts writing to it, so until then it can keep up
+to about twice as many instances as it ever held at once.
 
 - `close()` stops the instance: calls made after it throw `WasmEngineException`, while a call
   already running finishes. It never throws.
