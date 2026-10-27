@@ -419,7 +419,7 @@ public final class JffiNativeMachine implements Machine {
         throw new WasmEngineException("Unsupported type for native: " + type);
     }
 
-    private static CallContext createEntryTrampolineCallContext(FunctionType funcType) {
+    static CallContext createEntryTrampolineCallContext(FunctionType funcType) {
         var paramTypes = new ArrayList<Type>();
         paramTypes.add(Type.POINTER); // funcPtr (first arg to entry trampoline)
         paramTypes.add(Type.POINTER); // memBase
@@ -918,12 +918,6 @@ public final class JffiNativeMachine implements Machine {
     /** Returns how many functions, imported and defined, this machine's function table holds. */
     int functionCount() {
         return (int) (funcTableSize / 8);
-    }
-
-    /** Returns the call context of {@code funcId}'s entry trampoline, or null if not compiled. */
-    CallContext entryCallContext(int funcId) {
-        var trampoline = entryTrampolines[funcId];
-        return trampoline == null ? null : trampoline.getCallContext();
     }
 
     /** Package-private: used by JffiNativeTable to resolve funcId → funcPtr. */

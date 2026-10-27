@@ -36,7 +36,7 @@ public final class NativeFootprint {
     }
 
     /** Bytes allocated and not yet freed. */
-    public static long live() {
+    static long live() {
         return GLOBAL.live.get();
     }
 

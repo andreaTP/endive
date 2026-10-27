@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Test;
 import run.endive.corpus.CorpusResources;
 import run.endive.redline.experimental.api.ImportFactory;
 import run.endive.redline.experimental.api.NativeCode;
-import run.endive.redline.experimental.api.internal.NativeFootprint;
+import run.endive.redline.experimental.api.internal.NativeFootprints;
 import run.endive.redline.experimental.api.internal.RedlineTarget;
 import run.endive.redline.experimental.compiler.internal.NativeCompiler;
 import run.endive.redline.experimental.runner.jffi.JffiMachineFactoryProvider;
@@ -85,7 +85,7 @@ public class LifecycleTest {
     private static void assertCountsWhileReachable(
             WasmModule module, NativeCode code, long before) {
         var instance = build(module, code);
-        assertTrue(NativeFootprint.live() > before, "nothing was counted");
+        assertTrue(NativeFootprints.live() > before, "nothing was counted");
         instance.close();
     }
 
@@ -463,7 +463,7 @@ public class LifecycleTest {
         while (stable < 3 && System.nanoTime() < deadline) {
             System.gc();
             Thread.sleep(20);
-            long live = NativeFootprint.live();
+            long live = NativeFootprints.live();
             stable = live == previous ? stable + 1 : 0;
             previous = live;
         }
@@ -472,8 +472,8 @@ public class LifecycleTest {
 
     private static void awaitFreed(long baseline) throws InterruptedException {
         awaitTrue(
-                () -> NativeFootprint.live() <= baseline,
-                () -> (NativeFootprint.live() - baseline) + " native bytes still live");
+                () -> NativeFootprints.live() <= baseline,
+                () -> (NativeFootprints.live() - baseline) + " native bytes still live");
     }
 
     private static void awaitCollected(WeakReference<?> reference) throws InterruptedException {
