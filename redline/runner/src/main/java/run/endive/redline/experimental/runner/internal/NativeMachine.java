@@ -806,7 +806,6 @@ public final class NativeMachine implements Machine {
         if (importGlobalsInitialized || globalCount == 0) {
             return;
         }
-        importGlobalsInitialized = true;
 
         // Module-defined globals are already NativeGlobalInstance (created by globalFactory).
         int importGlobalCount =
@@ -824,17 +823,13 @@ public final class NativeMachine implements Machine {
             if (!(global instanceof NativeGlobalInstance nativeGlobal)) {
                 throw new WasmEngineException(foreignImportMessage("global", global));
             }
-            if (nativeGlobal.isAdoptable()) {
-                // Passed in by the host: adopt it, so what this module writes stays
-                // visible through the caller's own object.
-                nativeGlobal.bind(globalsBuffer, i, this);
-            } else {
-                // Exported by another module, and already sitting where that
-                // module's compiled code reads it. Its storage cannot move, so this
-                // module starts from its current value.
+            if (!nativeGlobal.adopt(globalsBuffer, i, this)) {
+                // exported by another module or used by an open instance: start from its value
                 globalsBuffer.set(ValueLayout.JAVA_LONG, (long) i * 8, nativeGlobal.getValue());
             }
         }
+        // last, so a foreign global fails every call instead of leaving the rest unset
+        importGlobalsInitialized = true;
     }
 
     private void initializeNativeTables() {

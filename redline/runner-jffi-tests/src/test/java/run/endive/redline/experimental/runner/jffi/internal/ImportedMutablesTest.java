@@ -2,6 +2,7 @@ package run.endive.redline.experimental.runner.jffi.internal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import org.junit.jupiter.api.Test;
 import run.endive.corpus.CorpusResources;
@@ -16,6 +17,7 @@ import run.endive.runtime.ImportValues;
 import run.endive.runtime.Memory;
 import run.endive.runtime.TableInstance;
 import run.endive.wasm.Parser;
+import run.endive.wasm.WasmEngineException;
 import run.endive.wasm.WasmModule;
 import run.endive.wasm.types.MemoryLimits;
 import run.endive.wasm.types.MutabilityType;
@@ -78,6 +80,20 @@ public class ImportedMutablesTest {
                     Value.REF_NULL_VALUE,
                     table.ref(0),
                     "the caller's own table must carry the funcref the module stored");
+        }
+    }
+
+    @Test
+    public void aGlobalFromAnotherBackendFailsEveryCall() {
+        var bytecodeGlobal =
+                GlobalInstance.builder()
+                        .value(Value.i32(10))
+                        .mutabilityType(MutabilityType.Var)
+                        .build();
+        try (var instance = build(nativeMemory(), nativeTable(), bytecodeGlobal)) {
+            assertThrows(WasmEngineException.class, () -> instance.export("run").apply());
+            // not just the first one, which used to leave the global unset for the rest
+            assertThrows(WasmEngineException.class, () -> instance.export("run").apply());
         }
     }
 

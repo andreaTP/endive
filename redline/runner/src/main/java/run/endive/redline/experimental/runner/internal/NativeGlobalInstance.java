@@ -51,13 +51,19 @@ public final class NativeGlobalInstance extends GlobalInstance {
         return new NativeGlobalInstance(initialValue, valType, mutabilityType, true);
     }
 
-    /** A host global can be adopted unless an open instance is using it. */
-    boolean isAdoptable() {
-        if (!hostCreated) {
+    /**
+     * Moves a host global onto slot {@code index} of {@code owner}'s buffer, unless an open
+     * instance is using it. Checked and moved under one lock, so two instances can't both take it.
+     *
+     * @return whether it moved
+     */
+    synchronized boolean adopt(MemorySegment target, int index, NativeMachine owner) {
+        var machine = boundTo == null ? null : boundTo.get();
+        if (!hostCreated || (machine != null && !machine.isClosed())) {
             return false;
         }
-        var machine = boundTo == null ? null : boundTo.get();
-        return machine == null || machine.isClosed();
+        bind(target, index, owner);
+        return true;
     }
 
     @Override
@@ -69,7 +75,7 @@ public final class NativeGlobalInstance extends GlobalInstance {
     }
 
     /** Moves the value onto slot {@code index} of {@code owner}'s {@code target}. */
-    void bind(MemorySegment target, int index, NativeMachine owner) {
+    synchronized void bind(MemorySegment target, int index, NativeMachine owner) {
         long offset = (long) index * 8;
         target.set(ValueLayout.JAVA_LONG, offset, getValue());
         this.boundTo = new WeakReference<>(owner);
@@ -99,7 +105,7 @@ public final class NativeGlobalInstance extends GlobalInstance {
     }
 
     @Override
-    public void setValueLow(long value) {
+    public synchronized void setValueLow(long value) {
         var s = slot;
         s.buffer().set(ValueLayout.JAVA_LONG, s.offset(), value);
     }

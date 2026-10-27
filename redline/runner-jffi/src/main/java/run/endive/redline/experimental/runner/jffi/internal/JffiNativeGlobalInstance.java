@@ -57,13 +57,19 @@ public final class JffiNativeGlobalInstance extends GlobalInstance {
         return new JffiNativeGlobalInstance(initialValue, valType, mutabilityType, true);
     }
 
-    /** A host global can be adopted unless an open instance is using it. */
-    boolean isAdoptable() {
-        if (!hostCreated) {
+    /**
+     * Moves a host global onto slot {@code index} of {@code owner}'s buffer, unless an open
+     * instance is using it. Checked and moved under one lock, so two instances can't both take it.
+     *
+     * @return whether it moved
+     */
+    synchronized boolean adopt(JffiGlobalsBuffer buffer, int index, JffiNativeMachine owner) {
+        var machine = boundTo == null ? null : boundTo.get();
+        if (!hostCreated || (machine != null && !machine.isClosed())) {
             return false;
         }
-        var machine = boundTo == null ? null : boundTo.get();
-        return machine == null || machine.isClosed();
+        bind(buffer, index, owner);
+        return true;
     }
 
     @Override
@@ -75,7 +81,7 @@ public final class JffiNativeGlobalInstance extends GlobalInstance {
     }
 
     /** Moves the value onto slot {@code index} of {@code owner}'s {@code buffer}. */
-    void bind(JffiGlobalsBuffer buffer, int index, JffiNativeMachine owner) {
+    synchronized void bind(JffiGlobalsBuffer buffer, int index, JffiNativeMachine owner) {
         long address = buffer.address() + (long) index * 8;
         try {
             MEM.putLong(address, getValue());
@@ -116,7 +122,7 @@ public final class JffiNativeGlobalInstance extends GlobalInstance {
     }
 
     @Override
-    public void setValueLow(long value) {
+    public synchronized void setValueLow(long value) {
         var s = slot;
         if (s == null) {
             super.setValueLow(value);
