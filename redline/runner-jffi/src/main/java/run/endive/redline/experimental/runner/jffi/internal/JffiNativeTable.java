@@ -34,7 +34,9 @@ import run.endive.wasm.types.ValType;
  * calls an entry directly only from the owner's instance. The table keeps every
  * native instance whose id its entries hold, see {@link #writers}. An entry
  * owned by an instance without native code has no pointer and no owner id; its
- * owner is kept in {@link #owners} instead.
+ * owner is kept in {@link #owners} instead. Like any Wasm table, it must not be
+ * written from two threads at once: a write racing a prune of the writers can
+ * leave an entry whose owner the table no longer keeps.
  */
 public final class JffiNativeTable extends TableInstance {
 
