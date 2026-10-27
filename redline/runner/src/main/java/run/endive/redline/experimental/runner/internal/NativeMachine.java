@@ -19,6 +19,7 @@ import run.endive.redline.experimental.api.NativeCode;
 import run.endive.redline.experimental.api.internal.CtxBuffer;
 import run.endive.redline.experimental.api.internal.InterruptWatchdog;
 import run.endive.redline.experimental.api.internal.NativeCodeCheck;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 import run.endive.redline.experimental.api.internal.TypeMapUtils;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Machine;
@@ -163,8 +164,13 @@ public final class NativeMachine implements Machine {
         // arena of its own, so a global bound to it keeps only this buffer alive.
         if (globalCount > 0) {
             var globalsArena = Arena.ofAuto();
-            this.globalsBuffer = globalsArena.allocate((long) globalCount * 8, 8);
-            PanamaExecutor.countUntilFreed(globalsArena);
+            long globalsSize = (long) globalCount * 8;
+            this.globalsBuffer =
+                    globalsArena
+                            .allocate(globalsSize, 8)
+                            .reinterpret(
+                                    globalsArena, ignored -> NativeFootprint.freed(globalsSize));
+            NativeFootprint.allocated(globalsSize);
         } else {
             this.globalsBuffer = MemorySegment.NULL;
         }
@@ -220,8 +226,10 @@ public final class NativeMachine implements Machine {
 
         try {
             codeRegion = PanamaExecutor.mmapReadWrite(codeRegionSize);
+            long size = codeRegionSize + NativeFootprint.MAPPING_COST;
             // unmapped with the arena; downcalls keep this global view and don't acquire it
-            codeRegion.reinterpret(arena, PanamaExecutor::unmapQuietly);
+            PanamaExecutor.unmapWith(arena, codeRegion, () -> size);
+            NativeFootprint.allocated(size);
             MemorySegment.copy(MemorySegment.ofArray(image), 0, codeRegion, 0, image.length);
             for (int funcId = 0; funcId < numImports; funcId++) {
                 codeRegion.set(
@@ -258,8 +266,6 @@ public final class NativeMachine implements Machine {
         } catch (Throwable e) {
             throw new WasmEngineException("Failed to set up native code", e);
         }
-
-        PanamaExecutor.countUntilFreed(arena);
     }
 
     /** Binds a global this module defines to its slot, as the instance creates it. */

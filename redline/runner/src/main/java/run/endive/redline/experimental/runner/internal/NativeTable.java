@@ -7,6 +7,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.Arrays;
 import run.endive.redline.experimental.api.internal.CtxBuffer;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 import run.endive.runtime.Instance;
 import run.endive.runtime.TableInstance;
 import run.endive.runtime.TrapException;
@@ -81,15 +82,20 @@ public final class NativeTable extends TableInstance {
         long bufferSize =
                 CtxBuffer.TABLE_ENTRIES_OFFSET + (long) capacity * CtxBuffer.TABLE_ENTRY_SIZE;
         var arena = Arena.ofAuto();
+        // the entries in use at first; growth isn't counted
+        long charged =
+                NativeFootprint.MAPPING_COST
+                        + CtxBuffer.TABLE_ENTRIES_OFFSET
+                        + (long) initial * CtxBuffer.TABLE_ENTRY_SIZE;
         try {
             // mapped rather than allocated, so only the entries in use take physical memory
             this.buffer =
-                    PanamaExecutor.mmapReadWrite(bufferSize)
-                            .reinterpret(bufferSize, arena, PanamaExecutor::unmapQuietly);
+                    PanamaExecutor.unmapWith(
+                            arena, PanamaExecutor.mmapReadWrite(bufferSize), () -> charged);
         } catch (Throwable e) {
             throw new WasmEngineException("Failed to map a table of " + capacity + " entries", e);
         }
-        PanamaExecutor.countUntilFreed(arena);
+        NativeFootprint.allocated(charged);
 
         // Write header
         buffer.set(ValueLayout.JAVA_INT, CtxBuffer.TABLE_SIZE_OFFSET, initial);

@@ -1,6 +1,7 @@
 package run.endive.redline.experimental.runner.jffi.internal;
 
 import com.kenai.jffi.MemoryIO;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 
 /**
  * An instance's globals buffer, freed once nothing reaches it: neither its machine nor a
@@ -19,7 +20,9 @@ final class JffiGlobalsBuffer {
             throw new OutOfMemoryError("Failed to allocate " + size + " native bytes");
         }
         this.address = allocated;
-        JffiCleaner.register(this, () -> MEM.freeMemory(allocated));
+        JffiCleaner.register(
+                this, () -> MEM.freeMemory(allocated), () -> NativeFootprint.freed(size));
+        NativeFootprint.allocated(size);
     }
 
     /** The buffer's address: keep this object reachable while using it. */

@@ -7,6 +7,7 @@ import com.kenai.jffi.PageManager;
 import java.lang.ref.Reference;
 import java.util.Arrays;
 import run.endive.redline.experimental.api.internal.CtxBuffer;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 import run.endive.runtime.Instance;
 import run.endive.runtime.TableInstance;
 import run.endive.runtime.TrapException;
@@ -77,7 +78,14 @@ public final class JffiNativeTable extends TableInstance {
         // locals, so the free doesn't reach this table and keep it alive
         long address = bufferAddress;
         int pages = bufferPages;
-        JffiCleaner.register(this, () -> PM.freePages(address, pages));
+        // the entries in use at first; growth isn't counted
+        long charged =
+                NativeFootprint.MAPPING_COST
+                        + CtxBuffer.TABLE_ENTRIES_OFFSET
+                        + (long) initial * CtxBuffer.TABLE_ENTRY_SIZE;
+        JffiCleaner.register(
+                this, () -> PM.freePages(address, pages), () -> NativeFootprint.freed(charged));
+        NativeFootprint.allocated(charged);
 
         // Write header
         MEM.putInt(bufferAddress + CtxBuffer.TABLE_SIZE_OFFSET, initial);

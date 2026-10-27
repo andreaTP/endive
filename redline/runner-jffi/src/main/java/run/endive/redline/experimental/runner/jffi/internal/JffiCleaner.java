@@ -1,7 +1,6 @@
 package run.endive.redline.experimental.runner.jffi.internal;
 
 import java.lang.ref.Cleaner;
-import run.endive.redline.experimental.api.internal.NativeResourceCount;
 
 /**
  * Frees jffi allocations once the garbage collector finds their owner unreachable, as Panama
@@ -14,9 +13,8 @@ final class JffiCleaner {
 
     private JffiCleaner() {}
 
-    /** Runs {@code frees} in order once {@code owner} is unreachable, counted as one resource. */
+    /** Runs {@code frees} in order once {@code owner} is unreachable. */
     static void register(Object owner, Runnable... frees) {
-        NativeResourceCount.allocated();
         CLEANER.register(owner, new Frees(frees));
     }
 
@@ -37,7 +35,6 @@ final class JffiCleaner {
                     // a cleanup action has nowhere to report a failure: free the rest
                 }
             }
-            NativeResourceCount.freed();
         }
     }
 }

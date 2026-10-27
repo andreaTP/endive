@@ -6,7 +6,8 @@ import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
-import run.endive.redline.experimental.api.internal.NativeResourceCount;
+import java.util.function.LongSupplier;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 import run.endive.redline.experimental.api.internal.RedlineTarget;
 
 /**
@@ -251,10 +252,17 @@ final class PanamaExecutor {
         }
     }
 
-    /** Counts one native resource as live until the garbage collector frees {@code arena}. */
-    static void countUntilFreed(Arena arena) {
-        NativeResourceCount.allocated();
-        arena.allocate(1).reinterpret(arena, ignored -> NativeResourceCount.freed());
+    /**
+     * Unmaps {@code region} once the garbage collector frees {@code arena}, and takes the bytes
+     * {@code charged} reports off the native footprint.
+     */
+    static MemorySegment unmapWith(Arena arena, MemorySegment region, LongSupplier charged) {
+        return region.reinterpret(
+                arena,
+                r -> {
+                    unmapQuietly(r);
+                    NativeFootprint.freed(charged.getAsLong());
+                });
     }
 
     /** Unmap a memory region. */

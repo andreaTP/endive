@@ -8,7 +8,9 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.concurrent.atomic.AtomicLong;
 import run.endive.redline.experimental.api.internal.NativeAtomics;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 import run.endive.redline.experimental.api.internal.NativeWaiters;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Memory;
@@ -48,6 +50,8 @@ public final class NativeMemory implements Memory {
     private final NativeAtomics atomics;
     // Page count compiled code reads for a shared memory, which other instances may grow
     private final MemorySegment pagesCell;
+    // what the unmap takes off the native footprint: the mapping and its committed pages
+    private final AtomicLong committed = new AtomicLong();
     private volatile MemorySegment segment;
     private volatile int nPages;
     private DataSegment[] dataSegments;
@@ -69,11 +73,14 @@ public final class NativeMemory implements Memory {
 
         var arena = Arena.ofAuto();
         MemorySegment mapping = MemorySegment.NULL;
+        var committedBytes = committed;
         try {
             if (reservedSize > 0) {
                 mapping =
-                        PanamaExecutor.mmapNoAccess(reservedSize)
-                                .reinterpret(reservedSize, arena, PanamaExecutor::unmapQuietly);
+                        PanamaExecutor.unmapWith(
+                                arena,
+                                PanamaExecutor.mmapNoAccess(reservedSize),
+                                committedBytes::get);
             }
             if (nPages > 0) {
                 PanamaExecutor.mprotectReadWrite(mapping, PAGE_SIZE * (long) nPages);
@@ -84,6 +91,7 @@ public final class NativeMemory implements Memory {
         }
 
         this.reserved = mapping;
+        charge((reservedSize > 0 ? NativeFootprint.MAPPING_COST : 0) + PAGE_SIZE * (long) nPages);
         this.pagesCell = arena.allocate(ValueLayout.JAVA_INT);
         PAGES_CELL.setVolatile(pagesCell, 0L, nPages);
         this.segment = reserved.reinterpret(PAGE_SIZE * (long) nPages);
@@ -92,7 +100,11 @@ public final class NativeMemory implements Memory {
                         reservedSize > 0
                                 ? reserved.reinterpret(reservedSize).asByteBuffer()
                                 : ByteBuffer.allocateDirect(0));
-        PanamaExecutor.countUntilFreed(arena);
+    }
+
+    private void charge(long bytes) {
+        NativeFootprint.allocated(bytes);
+        committed.addAndGet(bytes);
     }
 
     /** Get the native address of the memory buffer, for passing to native code. */
@@ -121,6 +133,7 @@ public final class NativeMemory implements Memory {
         try {
             long newSize = PAGE_SIZE * (long) numPages;
             PanamaExecutor.mprotectReadWrite(reserved, newSize);
+            charge(PAGE_SIZE * (long) size);
             this.segment = reserved.reinterpret(newSize);
             this.nPages = numPages;
             // the page count compiled code reads goes last, once Java accepts the new pages

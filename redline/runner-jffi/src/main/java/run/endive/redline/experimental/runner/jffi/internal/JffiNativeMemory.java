@@ -12,7 +12,9 @@ import com.kenai.jffi.Type;
 import java.lang.invoke.VarHandle;
 import java.lang.ref.Reference;
 import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicLong;
 import run.endive.redline.experimental.api.internal.NativeAtomics;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 import run.endive.redline.experimental.api.internal.NativeWaiters;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Memory;
@@ -122,6 +124,8 @@ public final class JffiNativeMemory implements Memory {
     private final NativeAtomics atomics;
     // Page count compiled code reads for a shared memory, which other instances may grow
     private final long pagesCell;
+    // what the cleaner takes off the native footprint: the mapping and its committed pages
+    private final AtomicLong committed = new AtomicLong();
     private volatile int nPages;
     private DataSegment[] dataSegments;
 
@@ -184,10 +188,15 @@ public final class JffiNativeMemory implements Memory {
         long reservation = reservedAddress;
         int reservationPages = reservedOsPages;
         long cell = pagesCell;
+        var committedBytes = committed;
         JffiCleaner.register(
                 this,
                 () -> freeReservation(reservation, reservationPages),
-                () -> MEM.freeMemory(cell));
+                () -> MEM.freeMemory(cell),
+                () -> NativeFootprint.freed(committedBytes.get()));
+        charge(
+                (reservedOsPages > 0 ? NativeFootprint.MAPPING_COST : 0)
+                        + PAGE_SIZE * (long) nPages);
         MEM.putInt(pagesCell, nPages);
         this.atomics =
                 new NativeAtomics(
@@ -195,6 +204,11 @@ public final class JffiNativeMemory implements Memory {
                                 ? MEM.newDirectByteBuffer(
                                         reservedAddress, reservedOsPages * osPageSize)
                                 : ByteBuffer.allocateDirect(0));
+    }
+
+    private void charge(long bytes) {
+        NativeFootprint.allocated(bytes);
+        committed.addAndGet(bytes);
     }
 
     private static void freeReservation(long address, int osPages) {
@@ -246,6 +260,7 @@ public final class JffiNativeMemory implements Memory {
                 } else if (!protectReadWrite(reservedAddress, (long) numPages * osPerWasm)) {
                     return -1;
                 }
+                charge(PAGE_SIZE * (long) size);
                 // the page count compiled code reads goes last, once Java accepts the new pages
                 this.nPages = numPages;
                 VarHandle.releaseFence();

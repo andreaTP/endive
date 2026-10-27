@@ -137,10 +137,14 @@ closed or gone. A table also keeps alive every instance whose functions it holds
 
 - `close()` stops the instance: calls made after it throw `WasmEngineException`, while a call
   already running finishes. It never throws.
-- The garbage collector doesn't count native memory as heap, and running low on it doesn't trigger
-  a collection, so an instance you no longer reference holds its native memory until a collection
-  happens to find it. With many large, short-lived instances, leave room for that in the
-  process's memory limit.
+- The garbage collector doesn't count native memory as heap. Redline counts what it holds (code,
+  linear memory and tables) and calls `System.gc()` once that has grown by as much as it was at
+  its last low point, and by at least 256 MiB: set `-Dendive.redline.gcThreshold=<bytes>` to
+  change that minimum.
+- With G1 or Parallel GC, `System.gc()` is a full stop-the-world collection on the thread that
+  allocates; `-XX:+ExplicitGCInvokesConcurrent` makes it concurrent. With
+  `-XX:+DisableExplicitGC`, an instance you no longer reference holds its native memory until a
+  collection happens for other reasons.
 - A mutable global the host creates is shared live with one native instance at a time. Another
   instance that imports it while the first is open, or not yet collected, starts from a copy of
   its value.

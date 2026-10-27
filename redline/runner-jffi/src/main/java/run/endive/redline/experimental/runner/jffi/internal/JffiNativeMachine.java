@@ -24,6 +24,7 @@ import run.endive.redline.experimental.api.NativeCode;
 import run.endive.redline.experimental.api.internal.CtxBuffer;
 import run.endive.redline.experimental.api.internal.InterruptWatchdog;
 import run.endive.redline.experimental.api.internal.NativeCodeCheck;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 import run.endive.redline.experimental.api.internal.TypeMapUtils;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Machine;
@@ -261,6 +262,9 @@ public final class JffiNativeMachine implements Machine {
         long codeAddr = codeRegionAddr;
         int codePages = codeRegionOsPages;
         frees.push(() -> PM.freePages(codeAddr, codePages));
+        long codeBytes = (long) codePages * osPageSize + NativeFootprint.MAPPING_COST;
+        frees.push(() -> NativeFootprint.freed(codeBytes));
+        NativeFootprint.allocated(codeBytes);
 
         try {
             MEM.putByteArray(codeRegionAddr, image, 0, image.length);

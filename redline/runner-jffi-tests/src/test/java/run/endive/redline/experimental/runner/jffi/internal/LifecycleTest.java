@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Test;
 import run.endive.corpus.CorpusResources;
 import run.endive.redline.experimental.api.ImportFactory;
 import run.endive.redline.experimental.api.NativeCode;
-import run.endive.redline.experimental.api.internal.NativeResourceCount;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 import run.endive.redline.experimental.api.internal.RedlineTarget;
 import run.endive.redline.experimental.compiler.internal.NativeCompiler;
 import run.endive.redline.experimental.runner.jffi.JffiMachineFactoryProvider;
@@ -72,7 +72,7 @@ public class LifecycleTest {
         var withTable = parse("big-table");
         var withMemoryCode = compile(withMemory);
         var withTableCode = compile(withTable);
-        int before = settledCount();
+        long before = settledCount();
         assertCountsWhileReachable(withMemory, withMemoryCode, before);
         for (int i = 0; i < 100; i++) {
             build(withMemory, withMemoryCode).memory().writeI32(0, i);
@@ -82,9 +82,10 @@ public class LifecycleTest {
     }
 
     // so a test that waits for the count to drop back can't pass by never counting
-    private static void assertCountsWhileReachable(WasmModule module, NativeCode code, int before) {
+    private static void assertCountsWhileReachable(
+            WasmModule module, NativeCode code, long before) {
         var instance = build(module, code);
-        assertTrue(NativeResourceCount.live() > before, "nothing was counted");
+        assertTrue(NativeFootprint.live() > before, "nothing was counted");
         instance.close();
     }
 
@@ -157,7 +158,7 @@ public class LifecycleTest {
     public void closedInstancesAreFreedOnceUnreachable() throws InterruptedException {
         var module = parse("trap-stops-execution");
         var code = compile(module);
-        int before = settledCount();
+        long before = settledCount();
         for (int i = 0; i < 100; i++) {
             try (var instance = build(module, code)) {
                 instance.memory().writeI32(0, i);
@@ -343,7 +344,7 @@ public class LifecycleTest {
 
     @Test
     public void importsAreFreedOnceUnused() throws InterruptedException {
-        int before = settledCount();
+        long before = settledCount();
         useImportsOnce();
         awaitFreed(before);
     }
@@ -364,7 +365,7 @@ public class LifecycleTest {
     public void aFailedBuildIsFreed() throws InterruptedException {
         var module = parse("failing-start-imported-memory");
         var code = compile(module);
-        int before = settledCount();
+        long before = settledCount();
         for (int i = 0; i < 10; i++) {
             var values =
                     ImportValues.builder()
@@ -383,7 +384,7 @@ public class LifecycleTest {
     /** The spec keeps a failed build's functions in a table callable, for as long as it lives. */
     @Test
     public void aFailedBuildInATableLastsAsLongAsTheTable() throws InterruptedException {
-        int before = settledCount();
+        long before = settledCount();
         var exporter = build(parse("call_indirect-export"), ImportValues.empty());
         failToBuildIntoTheTableOf(exporter);
 
@@ -439,7 +440,7 @@ public class LifecycleTest {
     public void aBuildThatFailsBeforeItsMachineFreesItsMemory() throws InterruptedException {
         var withMemory = parse("trap-stops-execution");
         var otherModulesCode = compile(parse("big-table"));
-        int before = settledCount();
+        long before = settledCount();
 
         assertThrows(WasmEngineException.class, () -> build(withMemory, otherModulesCode));
         awaitFreed(before);
@@ -455,24 +456,24 @@ public class LifecycleTest {
     }
 
     /** Frees earlier tests' garbage, so a count taken now is a stable baseline. */
-    private static int settledCount() throws InterruptedException {
-        int previous = Integer.MAX_VALUE;
+    private static long settledCount() throws InterruptedException {
+        long previous = Long.MAX_VALUE;
         int stable = 0;
         long deadline = System.nanoTime() + SECONDS.toNanos(30);
         while (stable < 3 && System.nanoTime() < deadline) {
             System.gc();
             Thread.sleep(20);
-            int live = NativeResourceCount.live();
+            long live = NativeFootprint.live();
             stable = live == previous ? stable + 1 : 0;
             previous = live;
         }
         return previous;
     }
 
-    private static void awaitFreed(int baseline) throws InterruptedException {
+    private static void awaitFreed(long baseline) throws InterruptedException {
         awaitTrue(
-                () -> NativeResourceCount.live() <= baseline,
-                () -> (NativeResourceCount.live() - baseline) + " native resources still live");
+                () -> NativeFootprint.live() <= baseline,
+                () -> (NativeFootprint.live() - baseline) + " native bytes still live");
     }
 
     private static void awaitCollected(WeakReference<?> reference) throws InterruptedException {
