@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import run.endive.corpus.CorpusResources;
 import run.endive.redline.experimental.api.NativeCode;
 import run.endive.redline.experimental.api.internal.RedlineTarget;
 import run.endive.redline.experimental.compiler.internal.NativeCompiler;
@@ -17,7 +18,6 @@ import run.endive.runtime.HostFunction;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Store;
 import run.endive.testing.NativeInstanceBuilder;
-import run.endive.tools.wasm.Wat2Wasm;
 import run.endive.wasm.Parser;
 import run.endive.wasm.WasmEngineException;
 import run.endive.wasm.WasmModule;
@@ -37,88 +37,12 @@ import run.endive.wasm.types.ValType;
  */
 public class CrossInstanceCallIndirectTest {
 
-    /**
-     * Owns the functions. Its global and memory hold 42 and 1000, which the
-     * caller's do not.
-     */
-    private static final String OWNER =
-            """
-            (module
-              (import "host" "seven" (func $host (result i32)))
-              (memory 1)
-              (global $g (mut i32) (i32.const 42))
-              (table (export "tab") 6 funcref)
-              (data (i32.const 16) "\\e8\\03\\00\\00")
-              (func $readGlobal (result i32) global.get $g)
-              (func $readMemory (result i32) (i32.load (i32.const 16)))
-              (func $trap (result i32) unreachable)
-              (func $pair (result i32 i32) global.get $g (i32.load (i32.const 16)))
-              (func $bumpGlobal (result i32)
-                (global.set $g (i32.add (global.get $g) (i32.const 1)))
-                global.get $g)
-              (elem (i32.const 0) $readGlobal $readMemory $host $trap $pair $bumpGlobal))
-            """;
-
-    /**
-     * Calls through the owner's table. Its own global and memory differ from
-     * the owner's, and its types are declared in a different order, so type
-     * indices differ between the two.
-     */
-    private static final String CALLER =
-            """
-            (module
-              (type $byIndex (func (param i32) (result i32)))
-              (type $i64 (func (result i64)))
-              (type $pair (func (result i32 i32)))
-              (type $i32 (func (result i32)))
-              (import "owner" "tab" (table 6 funcref))
-              (memory 1)
-              (global $g (mut i32) (i32.const -1))
-              (func (export "call") (type $byIndex)
-                (call_indirect (type $i32) (local.get 0)))
-              (func (export "tailCall") (type $byIndex)
-                (return_call_indirect (type $i32) (local.get 0)))
-              (func (export "callPair") (result i32)
-                (call_indirect (type $pair) (i32.const 4))
-                i32.sub)
-              (func (export "wrongType") (result i64)
-                (call_indirect (type $i64) (i32.const 0))))
-            """;
-
-    /** Defines an empty table and calls through it. */
-    private static final String HOLDER =
-            """
-            (module
-              (type $i32 (func (result i32)))
-              (table (export "tab") 2 4 funcref)
-              (func (export "call") (param i32) (result i32)
-                (call_indirect (type $i32) (local.get 0))))
-            """;
-
-    /** Puts its function, which returns 42, in the holder's table. */
-    private static final String WRITER =
-            """
-            (module
-              (import "holder" "tab" (table 2 funcref))
-              (global $g i32 (i32.const 42))
-              (func $answer (result i32) global.get $g)
-              (elem (i32.const 0) $answer))
-            """;
-
-    /**
-     * Calls through the holder's table. Its own function has the same index as
-     * the writer's but returns -1.
-     */
-    private static final String READER =
-            """
-            (module
-              (type $i32 (func (result i32)))
-              (import "holder" "tab" (table 2 funcref))
-              (global $g i32 (i32.const -1))
-              (func $own (result i32) global.get $g)
-              (func (export "call") (param i32) (result i32)
-                (call_indirect (type $i32) (local.get 0))))
-            """;
+    private static final String OWNER = "cross-instance-owner";
+    private static final String CALLER = "cross-instance-caller";
+    private static final String HOLDER = "cross-instance-holder";
+    private static final String WRITER = "cross-instance-writer";
+    private static final String READER = "cross-instance-reader";
+    private static final String SETTER = "cross-instance-setter";
 
     @Test
     public void calleeReadsItsOwnGlobal() {
@@ -178,28 +102,9 @@ public class CrossInstanceCallIndirectTest {
                         FunctionType.of(List.of(), List.of(ValType.I32, ValType.I32)),
                         (inst, args) -> null);
         var store = new Store().addFunction(none);
-        try (var owner =
-                nativeInstance(
-                        """
-                        (module
-                          (import "host" "none" (func $none (result i32 i32)))
-                          (table (export "tab") 1 funcref)
-                          (elem (i32.const 0) $none))
-                        """,
-                        store)) {
+        try (var owner = nativeInstance("cross-instance-null-host-owner", store)) {
             store.register("owner", owner);
-            try (var caller =
-                    nativeInstance(
-                            """
-                            (module
-                              (type $pair (func (result i32 i32)))
-                              (import "owner" "tab" (table 1 funcref))
-                              (func (export "call")
-                                (call_indirect (type $pair) (i32.const 0))
-                                drop
-                                drop))
-                            """,
-                            store)) {
+            try (var caller = nativeInstance("cross-instance-null-host-caller", store)) {
                 assertDoesNotThrow(() -> caller.export("call").apply());
             }
         }
@@ -217,30 +122,9 @@ public class CrossInstanceCallIndirectTest {
     @Test
     public void callerSeesMemoryTheCalleeGrew() {
         var store = new Store();
-        try (var owner =
-                nativeInstance(
-                        """
-                        (module
-                          (memory (export "mem") 1)
-                          (table (export "tab") 1 funcref)
-                          (func $grow (result i32) (memory.grow (i32.const 1)))
-                          (elem (i32.const 0) $grow))
-                        """,
-                        store)) {
+        try (var owner = nativeInstance("cross-instance-grow-owner", store)) {
             store.register("owner", owner);
-            try (var caller =
-                    nativeInstance(
-                            """
-                            (module
-                              (type $i32 (func (result i32)))
-                              (import "owner" "mem" (memory 1))
-                              (import "owner" "tab" (table 1 funcref))
-                              (func (export "growThenStore") (result i32)
-                                (drop (call_indirect (type $i32) (i32.const 0)))
-                                (i32.store (i32.const 65536) (memory.size))
-                                (i32.load (i32.const 65536))))
-                            """,
-                            store)) {
+            try (var caller = nativeInstance("cross-instance-grow-caller", store)) {
                 assertEquals(2, (int) caller.export("growThenStore").apply()[0]);
             }
         }
@@ -253,33 +137,9 @@ public class CrossInstanceCallIndirectTest {
     @Test
     public void calleeSharesTheCallersStackBudget() {
         var store = new Store();
-        try (var owner =
-                nativeInstance(
-                        """
-                        (module
-                          (global (export "depth") (mut i32) (i32.const 0))
-                          (table (export "tab") 1 funcref)
-                          (func $recurse (result i32)
-                            (global.set 0 (i32.add (global.get 0) (i32.const 1)))
-                            (call $recurse))
-                          (elem (i32.const 0) $recurse))
-                        """,
-                        store)) {
+        try (var owner = nativeInstance("cross-instance-recurse-entry-owner", store)) {
             store.register("owner", owner);
-            try (var caller =
-                    nativeInstance(
-                            """
-                            (module
-                              (type $i32 (func (result i32)))
-                              (import "owner" "tab" (table 1 funcref))
-                              (global (export "depth") (mut i32) (i32.const 0))
-                              (func $descend (export "descend") (param i32) (result i32)
-                                (global.set 0 (i32.add (global.get 0) (i32.const 1)))
-                                (if (result i32) (local.get 0)
-                                  (then (call $descend (i32.sub (local.get 0) (i32.const 1))))
-                                  (else (call_indirect (type $i32) (i32.const 0))))))
-                            """,
-                            store)) {
+            try (var caller = nativeInstance("cross-instance-recurse-entry-caller", store)) {
                 int callerBudget = depthReached(caller, -1, caller);
                 int fromTheTop = depthReached(caller, 0, owner);
                 int fromHalfway = depthReached(caller, callerBudget / 2, owner);
@@ -293,31 +153,9 @@ public class CrossInstanceCallIndirectTest {
     @Test
     public void importedFunctionSharesTheCallersStackBudget() {
         var store = new Store();
-        try (var owner =
-                nativeInstance(
-                        """
-                        (module
-                          (global (export "depth") (mut i32) (i32.const 0))
-                          (func $recurse (export "recurse") (result i32)
-                            (global.set 0 (i32.add (global.get 0) (i32.const 1)))
-                            (call $recurse)))
-                        """,
-                        store)) {
+        try (var owner = nativeInstance("cross-instance-recurse-import-owner", store)) {
             store.register("owner", owner);
-            try (var caller =
-                    nativeInstance(
-                            """
-                            (module
-                              (import "owner" "recurse" (func $recurse (result i32)))
-                              (global (export "depth") (mut i32) (i32.const 0))
-                              (func $descend (export "descend") (param i32) (result i32)
-                                (global.set 0 (i32.add (global.get 0) (i32.const 1)))
-                                (if (result i32) (local.get 0)
-                                  (then
-                                    (call $descend (i32.sub (local.get 0) (i32.const 1))))
-                                  (else (call $recurse)))))
-                            """,
-                            store)) {
+            try (var caller = nativeInstance("cross-instance-recurse-import-caller", store)) {
                 int callerBudget = depthReached(caller, -1, caller);
                 int fromTheTop = depthReached(caller, 0, owner);
                 int fromHalfway = depthReached(caller, callerBudget / 2, owner);
@@ -343,28 +181,9 @@ public class CrossInstanceCallIndirectTest {
     @Test
     public void signatureAcceptsADeclaredSubtype() {
         var store = new Store();
-        try (var owner =
-                nativeInstance(
-                        """
-                        (module
-                          (type $super (sub (func (result funcref))))
-                          (type $sub (sub $super (func (result (ref func)))))
-                          (table (export "tab") 1 funcref)
-                          (func $f (type $sub) (ref.func $f))
-                          (elem (i32.const 0) $f))
-                        """,
-                        store)) {
+        try (var owner = nativeInstance("cross-instance-subtype-owner", store)) {
             store.register("owner", owner);
-            try (var caller =
-                    nativeInstance(
-                            """
-                            (module
-                              (type $super (sub (func (result funcref))))
-                              (import "owner" "tab" (table 1 funcref))
-                              (func (export "call") (result i32)
-                                (ref.is_null (call_indirect (type $super) (i32.const 0)))))
-                            """,
-                            store)) {
+            try (var caller = nativeInstance("cross-instance-subtype-caller", store)) {
                 assertEquals(0, (int) caller.export("call").apply()[0]);
             }
         }
@@ -392,33 +211,12 @@ public class CrossInstanceCallIndirectTest {
     @Test
     public void entriesFromAnInterpretedInstance() {
         var store = new Store();
-        try (var tableOwner =
-                nativeInstance(
-                        """
-                        (module
-                          (type $i32 (func (result i32)))
-                          (table (export "tab") 2 funcref)
-                          (global $g i32 (i32.const -1))
-                          (func $own (result i32) global.get $g)
-                          (elem (i32.const 1) $own)
-                          (func (export "call") (param i32) (result i32)
-                            (call_indirect (type $i32) (local.get 0))))
-                        """,
-                        store)) {
-            store.register("owner", tableOwner);
-            try (var filler =
-                    interpretedInstance(
-                            """
-                            (module
-                              (import "owner" "tab" (table 2 funcref))
-                              (global $g i32 (i32.const 42))
-                              (func $answer (result i32) global.get $g)
-                              (elem (i32.const 0) $answer))
-                            """,
-                            store)) {
-                assertEquals(42, call(tableOwner, "call", 0), "the interpreted filler's function");
-                assertEquals(-1, call(tableOwner, "call", 1), "the table owner's own function");
-                assertSame(filler, tableOwner.table(0).instance(0));
+        try (var holder = nativeInstance("cross-instance-holder-with-entry", store)) {
+            store.register("holder", holder);
+            try (var filler = interpretedInstance(WRITER, store)) {
+                assertEquals(42, call(holder, "call", 0), "the interpreted filler's function");
+                assertEquals(-1, call(holder, "call", 1), "the holder's own function");
+                assertSame(filler, holder.table(0).instance(0));
             }
         }
     }
@@ -441,15 +239,7 @@ public class CrossInstanceCallIndirectTest {
     @Test
     public void tableInitialiserBelongsToItsDefiningInstance() {
         var store = new Store();
-        try (var definer =
-                nativeInstance(
-                        """
-                        (module
-                          (global $g i32 (i32.const 42))
-                          (func $answer (result i32) global.get $g)
-                          (table (export "tab") 2 funcref (ref.func $answer)))
-                        """,
-                        store)) {
+        try (var definer = nativeInstance("cross-instance-definer", store)) {
             store.register("holder", definer);
             try (var reader = nativeInstance(READER, store)) {
                 assertEquals(42, call(reader, "call", 1), "the definer's function");
@@ -464,20 +254,7 @@ public class CrossInstanceCallIndirectTest {
         var store = storeWithHost();
         try (var owner = nativeInstance(OWNER, store)) {
             store.register("owner", owner);
-            try (var copier =
-                    nativeInstance(
-                            """
-                            (module
-                              (type $i32 (func (result i32)))
-                              (import "owner" "tab" (table $imported 6 funcref))
-                              (table $own 6 funcref)
-                              (func (export "copy")
-                                (table.copy $own $imported
-                                  (i32.const 0) (i32.const 0) (i32.const 6)))
-                              (func (export "call") (param i32) (result i32)
-                                (call_indirect $own (type $i32) (local.get 0))))
-                            """,
-                            store)) {
+            try (var copier = nativeInstance("cross-instance-copier", store)) {
                 copier.export("copy").apply();
                 assertEquals(42, call(copier, "call", 0));
                 assertEquals(1000, call(copier, "call", 1));
@@ -490,43 +267,18 @@ public class CrossInstanceCallIndirectTest {
     @Test
     public void copiedEntriesKeepTheirInterpretedOwner() {
         var store = new Store();
-        try (var tableOwner =
-                nativeInstance(
-                        """
-                        (module
-                          (type $i32 (func (result i32)))
-                          (table $a (export "a") 4 funcref)
-                          (table $b 4 funcref)
-                          (func (export "copyAToB")
-                            (table.copy $b $a (i32.const 0) (i32.const 0) (i32.const 4)))
-                          (func (export "shiftA")
-                            (table.copy $a $a (i32.const 1) (i32.const 0) (i32.const 3)))
-                          (func (export "callA") (param i32) (result i32)
-                            (call_indirect $a (type $i32) (local.get 0)))
-                          (func (export "callB") (param i32) (result i32)
-                            (call_indirect $b (type $i32) (local.get 0))))
-                        """,
-                        store)) {
-            store.register("owner", tableOwner);
-            try (var filler =
-                    interpretedInstance(
-                            """
-                            (module
-                              (import "owner" "a" (table 4 funcref))
-                              (global $g i32 (i32.const 42))
-                              (func $answer (result i32) global.get $g)
-                              (elem (i32.const 0) $answer))
-                            """,
-                            store)) {
-                tableOwner.export("copyAToB").apply();
-                assertEquals(42, call(tableOwner, "callB", 0));
-                assertSame(filler, tableOwner.table(1).instance(0));
+        try (var holder = nativeInstance("cross-instance-two-tables", store)) {
+            store.register("holder", holder);
+            try (var filler = interpretedInstance(WRITER, store)) {
+                holder.export("copyAToB").apply();
+                assertEquals(42, call(holder, "callB", 0));
+                assertSame(filler, holder.table(1).instance(0));
 
-                tableOwner.export("shiftA").apply();
-                assertEquals(42, call(tableOwner, "callA", 0));
-                assertEquals(42, call(tableOwner, "callA", 1));
-                assertSame(filler, tableOwner.table(0).instance(1));
-                assertNull(tableOwner.table(0).instance(2), "shifted in from a null entry");
+                holder.export("shiftA").apply();
+                assertEquals(42, call(holder, "callA", 0));
+                assertEquals(42, call(holder, "callA", 1));
+                assertSame(filler, holder.table(0).instance(1));
+                assertNull(holder.table(0).instance(2), "shifted in from a null entry");
             }
         }
     }
@@ -551,22 +303,7 @@ public class CrossInstanceCallIndirectTest {
         var store = new Store();
         try (var holder = nativeInstance(HOLDER, store)) {
             store.register("holder", holder);
-            try (var setter =
-                    nativeInstance(
-                            """
-                            (module
-                              (import "holder" "tab" (table 2 funcref))
-                              (global $g i32 (i32.const 42))
-                              (func $answer (result i32) global.get $g)
-                              (elem declare func $answer)
-                              (func (export "set") (param i32)
-                                (table.set (local.get 0) (ref.func $answer)))
-                              (func (export "grow") (result i32)
-                                (table.grow (ref.func $answer) (i32.const 1)))
-                              (func (export "fill")
-                                (table.fill (i32.const 0) (ref.func $answer) (i32.const 2))))
-                            """,
-                            store)) {
+            try (var setter = nativeInstance(SETTER, store)) {
                 setter.export("set").apply(0);
                 assertEquals(42, call(holder, "call", 0));
                 assertSame(setter, holder.table(0).instance(0));
@@ -620,18 +357,7 @@ public class CrossInstanceCallIndirectTest {
         var store = new Store();
         try (var holder = nativeInstance(HOLDER, store)) {
             store.register("holder", holder);
-            try (var setter =
-                    nativeInstance(
-                            """
-                            (module
-                              (import "holder" "tab" (table 2 funcref))
-                              (global $g i32 (i32.const 42))
-                              (func $answer (result i32) global.get $g)
-                              (elem declare func $answer)
-                              (func (export "set") (param i32)
-                                (table.set (local.get 0) (ref.func $answer))))
-                            """,
-                            store)) {
+            try (var setter = nativeInstance(SETTER, store)) {
                 setter.export("set").apply(0);
                 // enough writers over the same entry for the table to prune the setter
                 for (int i = 0; i < 20; i++) {
@@ -647,20 +373,7 @@ public class CrossInstanceCallIndirectTest {
     /** An image may leave functions out, which a table must not jump to. */
     @Test
     public void uncompiledFunctionIsNotCalled() {
-        var module =
-                parse(
-                        """
-                        (module
-                          (type $i32 (func (result i32)))
-                          (table 2 funcref)
-                          (func $uncompiled (result i32) (i32.const 7))
-                          (elem (i32.const 0) $uncompiled)
-                          (func (export "callElem") (result i32)
-                            (call_indirect (type $i32) (i32.const 0)))
-                          (func (export "setAndCall") (result i32)
-                            (table.set (i32.const 1) (ref.func $uncompiled))
-                            (call_indirect (type $i32) (i32.const 1))))
-                        """);
+        var module = module("cross-instance-uncompiled");
         try (var instance =
                 NativeMachineFactory.builder(module)
                         .withPrecompiledCode(withoutFirstBody(compile(module)))
@@ -704,12 +417,7 @@ public class CrossInstanceCallIndirectTest {
         }
     }
 
-    /**
-     * Instantiates the owner and the caller natively, with the caller importing
-     * the owner's table.
-     *
-     * @return the linked instances, to close after the test
-     */
+    /** Instantiates the owner and the caller natively, with the caller importing its table. */
     private static Linked linkNative() {
         var store = storeWithHost();
         var owner = nativeInstance(OWNER, store);
@@ -729,28 +437,23 @@ public class CrossInstanceCallIndirectTest {
         return new Store().addFunction(seven);
     }
 
-    /**
-     * Calls an export that takes a table index and returns an i32.
-     *
-     * @param instance the instance to call
-     * @param export the export's name
-     * @param index the table index to pass
-     * @return the result
-     */
+    /** Calls an export that takes a table index and returns an i32. */
     private static int call(Instance instance, String export, int index) {
         return (int) instance.export(export).apply(index)[0];
     }
 
-    /** Instantiates {@code wat} natively against the store's exports. */
-    private static Instance nativeInstance(String wat, Store store) {
-        return NativeInstanceBuilder.builder(parse(wat))
+    private static Instance nativeInstance(String name, Store store) {
+        return NativeInstanceBuilder.builder(module(name))
                 .withImportValues(store.toImportValues())
                 .build();
     }
 
-    /** Instantiates {@code wat} in the interpreter against the store's exports. */
-    private static Instance interpretedInstance(String wat, Store store) {
-        return Instance.builder(parse(wat)).withImportValues(store.toImportValues()).build();
+    private static Instance interpretedInstance(String name, Store store) {
+        return Instance.builder(module(name)).withImportValues(store.toImportValues()).build();
+    }
+
+    private static WasmModule module(String name) {
+        return Parser.parse(CorpusResources.getResource("compiled/" + name + ".wat.wasm"));
     }
 
     private static NativeCode compile(WasmModule module) {
@@ -773,10 +476,5 @@ public class CrossInstanceCallIndirectTest {
         }
         return new NativeCode(
                 code.triple(), code.image(), bodies, entries, importTrampolines, importSlots);
-    }
-
-    /** Parses a module from WebAssembly text format. */
-    private static WasmModule parse(String wat) {
-        return Parser.parse(Wat2Wasm.parse(wat));
     }
 }
