@@ -88,7 +88,6 @@ public final class NativeMachine implements Machine {
         }
     }
 
-    // freed by the garbage collector once nothing reaches this machine
     private final Arena arena = Arena.ofAuto();
     private final Upcalls upcalls = new Upcalls(this);
     private final Instance instance;
@@ -115,15 +114,12 @@ public final class NativeMachine implements Machine {
     private volatile Throwable pendingException;
     // the machine whose outermost call is running on this thread
     private static final ThreadLocal<NativeMachine> RUNNING = new ThreadLocal<>();
-    // calls under way, to tell the outermost one
+    // calls under way, on any thread
     private final AtomicInteger callDepth = new AtomicInteger();
     private final InterruptWatchdog.InterruptSink interruptFlag = this::raiseInterruptFlag;
     private volatile boolean closed;
 
-    /**
-     * Compiles nothing: links {@code precompiledCode} for {@code instance}. Its native
-     * state lives in an automatic arena, freed once nothing reaches this machine.
-     */
+    /** Links {@code precompiledCode} for {@code instance}. */
     public NativeMachine(Instance instance, NativeCode precompiledCode) {
         this.instance = instance;
         var module = instance.module();
@@ -160,8 +156,7 @@ public final class NativeMachine implements Machine {
                         + (module.globalSection() != null
                                 ? module.globalSection().globalCount()
                                 : 0);
-        // One slot per global, imported or defined, which bind() moves them onto. In an
-        // arena of its own, so a global bound to it keeps only this buffer alive.
+        // one slot per global; its own arena, so a bound global keeps only this buffer alive
         if (globalCount > 0) {
             var globalsArena = Arena.ofAuto();
             long globalsSize = (long) globalCount * 8;
@@ -301,10 +296,7 @@ public final class NativeMachine implements Machine {
         return instance;
     }
 
-    /**
-     * Stops the instance: calls that start from now on throw. A call already running
-     * finishes. The native state is freed once nothing reaches this machine.
-     */
+    /** Stops new calls; a call already running finishes. */
     @Override
     public void close() {
         closed = true;
@@ -883,11 +875,7 @@ public final class NativeMachine implements Machine {
         }
     }
 
-    /**
-     * What the upcall stubs call. A stub holds its target from a JNI root, so the target
-     * reaches the machine weakly: its code, and so every upcall, only runs inside
-     * call(), which keeps the machine reachable.
-     */
+    /** What the upcall stubs call. Stubs are rooted globally, so this holds the machine weakly. */
     @SuppressWarnings("unused") // called through method handles
     private static final class Upcalls {
         private final WeakReference<NativeMachine> machine;
@@ -1135,8 +1123,7 @@ public final class NativeMachine implements Machine {
                 }
             }
             callDepth.decrementAndGet();
-            // Keeps this machine, and so its code, stubs and buffers, reachable for the
-            // whole native call: the upcall stubs only hold it weakly.
+            // the upcall stubs hold this machine weakly, so keep it for the whole native call
             Reference.reachabilityFence(this);
         }
     }

@@ -13,7 +13,7 @@ import java.nio.ByteBuffer;
  * <p>Format:
  * <pre>
  *   [4 bytes: magic "CL4J"]
- *   [4 bytes: version (5)]
+ *   [4 bytes: version]
  *   [modified UTF-8: target triple]
  *   [4 bytes: image length]
  *   [N bytes: image]
@@ -30,7 +30,7 @@ import java.nio.ByteBuffer;
 public final class NativeCodeSerializer {
 
     private static final int MAGIC = 0x434C344A; // "CL4J"
-    private static final int VERSION = 5;
+    static final int VERSION = 5;
 
     private NativeCodeSerializer() {}
 

@@ -41,7 +41,7 @@ public class GuestSeesGrowthTest {
         POOL.shutdownNow();
     }
 
-    /** Code compiled for an unshared memory never rereads the page count, so it must stay so. */
+    /** Native code is compiled for either a shared or an unshared memory. */
     @Test
     public void memoryLimitsCannotMakeAnUnsharedMemoryShared() {
         var builder = JffiNativeMachineFactory.builder(parse("trap-stops-execution"));

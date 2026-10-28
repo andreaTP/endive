@@ -28,8 +28,7 @@ import run.endive.wasm.types.PassiveDataSegment;
  * memory committed), then mprotects pages as needed. Grow is zero-copy — just
  * mprotect the next range. The base address never changes.
  *
- * <p>The mapping lives in an automatic arena, so it is unmapped once nothing reaches the
- * memory: compiled code only uses it through an instance that holds the memory.
+ * <p>The mapping is unmapped once nothing reaches the memory.
  */
 public final class NativeMemory implements Memory {
 

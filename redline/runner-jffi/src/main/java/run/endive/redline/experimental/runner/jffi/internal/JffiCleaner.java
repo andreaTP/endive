@@ -2,11 +2,7 @@ package run.endive.redline.experimental.runner.jffi.internal;
 
 import java.lang.ref.Cleaner;
 
-/**
- * Frees jffi allocations once the garbage collector finds their owner unreachable, as Panama
- * does for automatic arenas. A free must not reach its owner, or the owner would never
- * become unreachable: capture addresses and handles only.
- */
+/** Frees jffi allocations once their owner is unreachable; a free must not reference it. */
 final class JffiCleaner {
 
     private static final Cleaner CLEANER = Cleaner.create();

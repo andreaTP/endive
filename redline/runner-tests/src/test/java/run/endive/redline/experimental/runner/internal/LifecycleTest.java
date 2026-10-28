@@ -44,10 +44,7 @@ import run.endive.wasm.types.TableLimits;
 import run.endive.wasm.types.ValType;
 import run.endive.wasm.types.Value;
 
-/**
- * Native state lives as long as the Java objects that use it, as on the heap: the garbage
- * collector frees it once nothing reaches it. close() only stops the instance.
- */
+/** Native state is freed once nothing reaches it; close() only stops the instance. */
 public class LifecycleTest {
 
     @Test
@@ -65,7 +62,6 @@ public class LifecycleTest {
         }
     }
 
-    /** Issue #203: instances nobody closes used to keep their native state forever. */
     @Test
     public void droppedInstancesAreFreed() throws InterruptedException {
         var withMemory = parse("trap-stops-execution");
@@ -81,7 +77,7 @@ public class LifecycleTest {
         awaitFreed(before);
     }
 
-    // so a test that waits for the count to drop back can't pass by never counting
+    // a count that never rises would pass awaitFreed without freeing anything
     private static void assertCountsWhileReachable(
             WasmModule module, NativeCode code, long before) {
         var instance = build(module, code);
@@ -89,7 +85,6 @@ public class LifecycleTest {
         instance.close();
     }
 
-    /** Host code keeps using what it holds while the instances that made it are collected. */
     @Test
     public void heldMemoryAndTablesSurviveCollection() throws InterruptedException {
         var withMemory = parse("trap-stops-execution");
@@ -131,7 +126,6 @@ public class LifecycleTest {
         }
     }
 
-    /** A memory and a table the host holds, and weak references to the instances that made them. */
     private static final class Held {
         final Memory memory;
         final TableInstance table;
@@ -167,7 +161,7 @@ public class LifecycleTest {
         awaitFreed(before);
     }
 
-    /** The upcall stubs only hold their machine weakly, or nothing could ever free it. */
+    /** Upcalls must hold their machine weakly. */
     @Test
     public void anInstanceThatCalledTheHostIsCollected() throws InterruptedException {
         awaitCollected(instanceThatCalledTheHost());
@@ -195,7 +189,6 @@ public class LifecycleTest {
         assertEquals(7, memory.readInt(0));
     }
 
-    /** A host function may close the instance that called it; the call still finishes. */
     @Test
     public void closingFromInsideACallLetsItFinish() {
         Instance[] self = new Instance[1];
@@ -275,7 +268,6 @@ public class LifecycleTest {
         assertEquals(12L, counter.getValue(), "and a new instance can import it again");
     }
 
-    /** A host global sits in its instance's globals buffer, but keeps only that alive. */
     @Test
     public void aHostGlobalDoesNotKeepItsInstanceAlive() throws InterruptedException {
         var counter = NativeMachineFactory.createImportGlobal(10L, ValType.I32, MutabilityType.Var);
@@ -309,7 +301,6 @@ public class LifecycleTest {
         second.close();
     }
 
-    /** Closing in any order works: what one instance imports stays alive while it uses it. */
     @Test
     public void anExportedMemoryOutlivesItsClosedExporter() throws InterruptedException {
         var exporter = build(parse("trap-stops-execution"), ImportValues.empty());
@@ -379,7 +370,7 @@ public class LifecycleTest {
         awaitFreed(before);
     }
 
-    /** The spec keeps a failed build's functions in a table callable, for as long as it lives. */
+    /** The spec keeps a failed build's functions in a table callable. */
     @Test
     public void aFailedBuildInATableLastsAsLongAsTheTable() throws InterruptedException {
         long before = settledCount();
@@ -410,7 +401,6 @@ public class LifecycleTest {
                 () -> build(parse("failing-start-table-writer"), values));
     }
 
-    /** Overwriting the entries that held a dropped instance lets the table let it go. */
     @Test
     public void aTableDropsWritersNoEntryNames() throws InterruptedException {
         var holder = build(parse("call_indirect-export"), ImportValues.empty());

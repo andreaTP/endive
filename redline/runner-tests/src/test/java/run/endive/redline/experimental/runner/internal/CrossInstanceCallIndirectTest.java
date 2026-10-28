@@ -168,7 +168,7 @@ public class CrossInstanceCallIndirectTest {
         }
     }
 
-    /** A host function may return no results, which the import path already tolerates. */
+    /** A call_indirect to a multi-value host function tolerates a null result. */
     @Test
     public void multiValueHostFunctionReturningNull() {
         var none =
@@ -290,7 +290,6 @@ public class CrossInstanceCallIndirectTest {
         }
     }
 
-    /** A call through a function import reaches the callee via the host, and shares the budget too. */
     @Test
     public void importedFunctionSharesTheCallersStackBudget() {
         var store = new Store();
@@ -616,10 +615,6 @@ public class CrossInstanceCallIndirectTest {
         }
     }
 
-    /**
-     * A table drops a writer none of its entries names any more, which must then register
-     * again on its next native table.set, or the entry would name an owner the table lost.
-     */
     @Test
     public void aPrunedWriterRegistersAgain() {
         var store = new Store();

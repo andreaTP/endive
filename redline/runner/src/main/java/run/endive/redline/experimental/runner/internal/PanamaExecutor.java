@@ -131,10 +131,7 @@ final class PanamaExecutor {
         }
     }
 
-    /**
-     * Maps zeroed read-write pages, which take physical memory only once touched. Code
-     * must go through mprotectExec before it runs.
-     */
+    /** Maps zeroed read-write pages; code must go through mprotectExec before it runs. */
     static MemorySegment mmapReadWrite(long size) throws Throwable {
         if (IS_WINDOWS) {
             MemorySegment addr =
@@ -252,10 +249,7 @@ final class PanamaExecutor {
         }
     }
 
-    /**
-     * Unmaps {@code region} once the garbage collector frees {@code arena}, and takes the bytes
-     * {@code charged} reports off the native footprint.
-     */
+    /** Unmaps {@code region} with {@code arena}, taking {@code charged} bytes off the footprint. */
     static MemorySegment unmapWith(Arena arena, MemorySegment region, LongSupplier charged) {
         return region.reinterpret(
                 arena,

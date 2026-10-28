@@ -103,7 +103,7 @@ public final class JffiNativeMachine implements Machine {
     private final long funcTableAddr;
     private final long funcTableSize; // byte size
     private final long argsBufferAddr;
-    // null without globals; separate, so a global bound to it keeps only the buffer alive
+    // null without globals
     private final JffiGlobalsBuffer globals;
     private final long globalsBufferAddr;
     private final long funcTypesArrayAddr;
@@ -124,7 +124,7 @@ public final class JffiNativeMachine implements Machine {
     private volatile Throwable pendingException;
     // the machine whose outermost call is running on this thread
     private static final ThreadLocal<JffiNativeMachine> RUNNING = new ThreadLocal<>();
-    // calls under way, to tell the outermost one
+    // calls under way, on any thread
     private final AtomicInteger callDepth = new AtomicInteger();
     private final InterruptWatchdog.InterruptSink interruptFlag = this::raiseInterruptFlag;
 
@@ -136,10 +136,7 @@ public final class JffiNativeMachine implements Machine {
     // native frees, newest first, handed to the cleaner once construction succeeds
     private final ArrayDeque<Runnable> frees;
 
-    /**
-     * Builds the machine. Its native state is freed once nothing reaches it, or right away
-     * if building it fails.
-     */
+    /** Builds the machine, freeing its native state at once if that fails. */
     public static JffiNativeMachine create(Instance instance, NativeCode precompiledCode) {
         var frees = new ArrayDeque<Runnable>();
         JffiNativeMachine machine;
@@ -152,7 +149,6 @@ public final class JffiNativeMachine implements Machine {
             }
             throw e;
         }
-        // the constructor allocated everything, so the list is complete
         JffiCleaner.register(machine, frees.toArray(new Runnable[0]));
         return machine;
     }
@@ -219,8 +215,7 @@ public final class JffiNativeMachine implements Machine {
             MEM.putInt(funcTypesArrayAddr + (long) funcId * 4, canonicalTypeMap[rawType]);
         }
 
-        // Tables are created after the machine, so their addresses are filled in on the
-        // first call; the arrays are allocated now, so nothing is freed late
+        // table addresses are filled in on the first call, into arrays allocated now
         int tableCount = instance.imports().tableCount() + module.tableSection().tableCount();
         this.nativeTables = null;
         this.tablePtrsArrayAddr = tableCount > 0 ? allocate((long) tableCount * 8) : 0L;
@@ -383,10 +378,7 @@ public final class JffiNativeMachine implements Machine {
         return instance;
     }
 
-    /**
-     * Stops the instance: calls that start from now on throw. A call already running
-     * finishes. The native state is freed once nothing reaches this machine.
-     */
+    /** Stops new calls; a call already running finishes. */
     @Override
     public void close() {
         closed = true;
@@ -889,11 +881,7 @@ public final class JffiNativeMachine implements Machine {
         }
     }
 
-    /**
-     * What the closures call. jffi keeps each closure from a JNI global ref, so the closure
-     * reaches the machine weakly: its code, and so every upcall, only runs inside call(),
-     * which keeps the machine reachable.
-     */
+    /** What the closures call. jffi roots closures globally, so this holds the machine weakly. */
     private static final class Upcalls {
         private final WeakReference<JffiNativeMachine> machine;
 
@@ -1193,8 +1181,7 @@ public final class JffiNativeMachine implements Machine {
                 }
             }
             callDepth.decrementAndGet();
-            // Keeps this machine, and so its code, closures and buffers, reachable for the
-            // whole native call: the closures only hold it weakly.
+            // the closures hold this machine weakly, so keep it for the whole native call
             Reference.reachabilityFence(this);
         }
     }

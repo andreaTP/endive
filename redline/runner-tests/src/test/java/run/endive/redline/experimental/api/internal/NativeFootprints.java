@@ -1,6 +1,6 @@
 package run.endive.redline.experimental.api.internal;
 
-/** Gives this module's tests the native footprint, which main code keeps package-private. */
+/** Test access to the package-private native footprint. */
 public final class NativeFootprints {
 
     private NativeFootprints() {}

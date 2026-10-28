@@ -38,8 +38,7 @@ import run.endive.wasm.types.ValType;
  * native instance whose id its entries hold, see {@link #writers}. An entry
  * owned by an instance without native code has no pointer and no owner id; its
  * owner is kept in {@link #owners} instead. Like any Wasm table, it must not be
- * written from two threads at once: a write racing a prune of the writers can
- * leave an entry whose owner the table no longer keeps.
+ * written from two threads at once.
  *
  * <p>The entries array is pre-allocated to the table's max capacity so that
  * {@code TABLE.GROW} only bumps the size field without reallocation.
@@ -50,8 +49,7 @@ import run.endive.wasm.types.ValType;
  * passed to {@link #setRef}, obtaining the calling module's NativeMachine.
  * This ensures cross-module shared tables resolve to the correct native addresses.
  *
- * <p>The buffer lives in an automatic arena, so it is freed once nothing reaches the
- * table: compiled code only uses it through an instance that holds the table.
+ * <p>The buffer is freed once nothing reaches the table.
  */
 public final class NativeTable extends TableInstance {
 

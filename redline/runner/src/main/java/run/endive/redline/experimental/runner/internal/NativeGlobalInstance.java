@@ -9,16 +9,13 @@ import run.endive.wasm.types.MutabilityType;
 import run.endive.wasm.types.ValType;
 import run.endive.wasm.types.Value;
 
-/**
- * A global in an instance's off-heap globals buffer once bound, and on the heap before.
- * The buffer stays allocated for as long as a global bound to it is reachable.
- */
+/** A global on the heap until bound to a globals buffer, which it then keeps alive. */
 public final class NativeGlobalInstance extends GlobalInstance {
 
     /** Created by the host to be imported, so an instance may adopt it. */
     private final boolean hostCreated;
 
-    // published whole, so a reader never pairs one buffer with another's offset
+    // null while on the heap; published whole, so buffer and offset always match
     private record Slot(MemorySegment buffer, long offset) {}
 
     private volatile Slot slot;
@@ -53,7 +50,7 @@ public final class NativeGlobalInstance extends GlobalInstance {
 
     /**
      * Moves a host global onto slot {@code index} of {@code owner}'s buffer, unless an open
-     * instance is using it. Checked and moved under one lock, so two instances can't both take it.
+     * instance is using it.
      *
      * @return whether it moved
      */

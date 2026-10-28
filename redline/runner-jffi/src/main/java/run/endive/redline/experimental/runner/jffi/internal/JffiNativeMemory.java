@@ -191,8 +191,7 @@ public final class JffiNativeMemory implements Memory {
             freeReservation(reservedAddress, reservedOsPages);
             throw new WasmEngineException("Failed to allocate the memory page count");
         }
-        // registered as soon as both exist, so a failure below still frees them; locals,
-        // so the frees don't reach this memory and keep it alive
+        // registered now, so a failure below still frees them; locals don't pin this memory
         long reservation = reservedAddress;
         int reservationPages = reservedOsPages;
         long cell = pagesCell;

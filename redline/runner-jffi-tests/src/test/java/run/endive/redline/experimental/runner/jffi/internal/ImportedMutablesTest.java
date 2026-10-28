@@ -92,7 +92,6 @@ public class ImportedMutablesTest {
                         .build();
         try (var instance = build(nativeMemory(), nativeTable(), bytecodeGlobal)) {
             assertThrows(WasmEngineException.class, () -> instance.export("run").apply());
-            // not just the first one, which used to leave the global unset for the rest
             assertThrows(WasmEngineException.class, () -> instance.export("run").apply());
         }
     }

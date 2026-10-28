@@ -19,11 +19,7 @@ import run.endive.wasm.types.TableLimits;
 import run.endive.wasm.types.ValType;
 import run.endive.wasm.types.Value;
 
-/**
- * A table's buffer is off-heap and freed once nothing reaches the table, whether the module
- * declared it or the host created it to import: an instance never frees a table someone else
- * still holds.
- */
+/** A table is freed once nothing reaches it, never while someone else holds it. */
 public class TableReleaseTest {
 
     @Test

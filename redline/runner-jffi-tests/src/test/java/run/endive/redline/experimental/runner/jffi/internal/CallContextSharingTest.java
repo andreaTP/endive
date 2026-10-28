@@ -8,7 +8,7 @@ import org.junit.jupiter.api.Test;
 import run.endive.wasm.types.FunctionType;
 import run.endive.wasm.types.ValType;
 
-/** jffi never frees a call context, so instances must share theirs instead of making new ones. */
+/** jffi never frees a call context, so instances must share them. */
 public class CallContextSharingTest {
 
     @Test

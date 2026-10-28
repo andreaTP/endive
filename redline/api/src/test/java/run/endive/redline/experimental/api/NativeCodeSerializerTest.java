@@ -55,9 +55,7 @@ public class NativeCodeSerializerTest {
 
     @Test
     public void anOlderVersionIsRejected() throws IOException {
-        // Version 4 code neither range-checks the function id table.set stores nor loads a
-        // shared memory's page count atomically
-        for (int version = 1; version <= 4; version++) {
+        for (int version = 1; version < NativeCodeSerializer.VERSION; version++) {
             var out = new ByteArrayOutputStream();
             var dos = new DataOutputStream(out);
             dos.writeInt(0x434C344A);

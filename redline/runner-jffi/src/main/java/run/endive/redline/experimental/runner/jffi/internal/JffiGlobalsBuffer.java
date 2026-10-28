@@ -3,10 +3,7 @@ package run.endive.redline.experimental.runner.jffi.internal;
 import com.kenai.jffi.MemoryIO;
 import run.endive.redline.experimental.api.internal.NativeFootprint;
 
-/**
- * An instance's globals buffer, freed once nothing reaches it: neither its machine nor a
- * global bound to it. Separate from the machine, so a host global keeps only this alive.
- */
+/** An instance's globals buffer, apart from its machine so a bound global keeps only this. */
 final class JffiGlobalsBuffer {
 
     private static final MemoryIO MEM = MemoryIO.getInstance();
