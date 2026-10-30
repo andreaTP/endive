@@ -69,7 +69,7 @@ fun addLibraryTests(configurationName: String, libraryPath: String) {
         project.dependencies.create(
             project.rootProject.files("../$libraryPath/target").asFileTree.matching {
                 include("*tests.jar")
-            }
+            },
         ),
     )
 }
