@@ -1,6 +1,7 @@
 package run.endive.redline.experimental.runner.jffi.internal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -38,6 +39,15 @@ public class GuestSeesGrowthTest {
     @AfterAll
     public static void shutdown() {
         POOL.shutdownNow();
+    }
+
+    /** Native code is compiled for either a shared or an unshared memory. */
+    @Test
+    public void memoryLimitsCannotMakeAnUnsharedMemoryShared() {
+        var builder = JffiNativeMachineFactory.builder(parse("trap-stops-execution"));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> builder.withMemoryLimits(new MemoryLimits(1, 2, true)));
     }
 
     @Test

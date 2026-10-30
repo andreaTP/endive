@@ -6,6 +6,8 @@ import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
+import java.util.function.LongSupplier;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 import run.endive.redline.experimental.api.internal.RedlineTarget;
 
 /**
@@ -29,8 +31,6 @@ final class PanamaExecutor {
     private static final java.lang.invoke.MethodHandle MMAP;
     private static final java.lang.invoke.MethodHandle MPROTECT;
     private static final java.lang.invoke.MethodHandle MUNMAP;
-    private static final java.lang.invoke.MethodHandle MALLOC;
-    private static final java.lang.invoke.MethodHandle FREE;
 
     // POSIX constants
     private static final int PROT_READ = 0x1;
@@ -62,14 +62,6 @@ final class PanamaExecutor {
         var lookup = LINKER.defaultLookup();
         MEMMOVE_ADDR = lookup.find("memmove").orElseThrow().address();
         MEMSET_ADDR = lookup.find("memset").orElseThrow().address();
-        MALLOC =
-                LINKER.downcallHandle(
-                        lookup.find("malloc").orElseThrow(),
-                        FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
-        FREE =
-                LINKER.downcallHandle(
-                        lookup.find("free").orElseThrow(),
-                        FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 
         try {
             if (IS_WINDOWS) {
@@ -139,20 +131,8 @@ final class PanamaExecutor {
         }
     }
 
-    static MemorySegment malloc(long size) throws Throwable {
-        MemorySegment addr = (MemorySegment) MALLOC.invokeExact(size);
-        if (addr.address() == 0) {
-            throw new OutOfMemoryError("malloc failed for " + size + " bytes");
-        }
-        return addr.reinterpret(size);
-    }
-
-    static void free(MemorySegment addr) throws Throwable {
-        FREE.invokeExact(addr);
-    }
-
-    /** Allocate a writable memory region. Must call mprotectExec before executing. */
-    static MemorySegment mmapCode(long size) throws Throwable {
+    /** Maps zeroed read-write pages; code must go through mprotectExec before it runs. */
+    static MemorySegment mmapReadWrite(long size) throws Throwable {
         if (IS_WINDOWS) {
             MemorySegment addr =
                     (MemorySegment)
@@ -258,6 +238,25 @@ final class PanamaExecutor {
         if (result != 0) {
             throw new RuntimeException("mprotect failed: " + result);
         }
+    }
+
+    /** Unmaps a region as an arena cleanup action, which has nowhere to report a failure. */
+    static void unmapQuietly(MemorySegment region) {
+        try {
+            munmap(region, region.byteSize());
+        } catch (Throwable e) {
+            // the region stays mapped: nothing else can be done from a cleanup action
+        }
+    }
+
+    /** Unmaps {@code region} with {@code arena}, taking {@code charged} bytes off the footprint. */
+    static MemorySegment unmapWith(Arena arena, MemorySegment region, LongSupplier charged) {
+        return region.reinterpret(
+                arena,
+                r -> {
+                    unmapQuietly(r);
+                    NativeFootprint.freed(charged.getAsLong());
+                });
     }
 
     /** Unmap a memory region. */

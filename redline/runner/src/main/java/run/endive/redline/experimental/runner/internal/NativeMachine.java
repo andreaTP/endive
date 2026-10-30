@@ -11,12 +11,15 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.ref.Reference;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import run.endive.redline.experimental.api.NativeCode;
 import run.endive.redline.experimental.api.internal.CtxBuffer;
 import run.endive.redline.experimental.api.internal.InterruptWatchdog;
 import run.endive.redline.experimental.api.internal.NativeCodeCheck;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 import run.endive.redline.experimental.api.internal.TypeMapUtils;
 import run.endive.runtime.Instance;
 import run.endive.runtime.Machine;
@@ -85,7 +88,8 @@ public final class NativeMachine implements Machine {
         }
     }
 
-    private final Arena arena;
+    private final Arena arena = Arena.ofAuto();
+    private final Upcalls upcalls = new Upcalls(this);
     private final Instance instance;
     private final MethodHandle[] downcalls;
     private final MemorySegment codeRegion;
@@ -98,28 +102,26 @@ public final class NativeMachine implements Machine {
     private final long ownerId = OWNER_IDS.incrementAndGet();
     private MemorySegment tablePtrsArray;
     private MemorySegment tableWriters;
-    private NativeTable[] nativeTables;
+    private volatile NativeTable[] nativeTables;
     private boolean tablesInitialized;
     private final int numImports;
+    private final int importGlobalCount;
     private final int globalCount;
+    private int definedGlobalsBound;
     private boolean importGlobalsInitialized;
     private MemorySegment cachedMemBase;
     private boolean memBaseInitialized;
-    private NativeMemory nativeMemory;
     private volatile Throwable pendingException;
-    private int callDepth;
+    // the machine whose outermost call is running on this thread
+    private static final ThreadLocal<NativeMachine> RUNNING = new ThreadLocal<>();
+    // calls under way, on any thread
+    private final AtomicInteger callDepth = new AtomicInteger();
     private final InterruptWatchdog.InterruptSink interruptFlag = this::raiseInterruptFlag;
-    private boolean ownsMemory;
-    private boolean closed;
+    private volatile boolean closed;
 
-    public NativeMachine(
-            Instance instance,
-            Arena arena,
-            java.util.List<NativeTable> sharedTables,
-            MemorySegment sharedGlobalsBuffer,
-            NativeCode precompiledCode) {
+    /** Links {@code precompiledCode} for {@code instance}. */
+    public NativeMachine(Instance instance, NativeCode precompiledCode) {
         this.instance = instance;
-        this.arena = arena;
         var module = instance.module();
         NativeCode code = NativeCodeCheck.check(precompiledCode, module);
         this.numImports =
@@ -140,20 +142,33 @@ public final class NativeMachine implements Machine {
         // Allocate function pointer table (one i64 per function)
         funcTable = arena.allocate((long) totalFuncs * 8, 8);
 
-        // Globals buffer from factory (already has module globals written by Instance)
-        this.globalsBuffer = sharedGlobalsBuffer;
-        this.globalCount =
+        this.importGlobalCount =
                 (int)
-                                module.importSection().stream()
-                                        .filter(
-                                                i ->
-                                                        i.importType()
-                                                                == run.endive.wasm.types
-                                                                        .ExternalType.GLOBAL)
-                                        .count()
+                        module.importSection().stream()
+                                .filter(
+                                        i ->
+                                                i.importType()
+                                                        == run.endive.wasm.types.ExternalType
+                                                                .GLOBAL)
+                                .count();
+        this.globalCount =
+                importGlobalCount
                         + (module.globalSection() != null
                                 ? module.globalSection().globalCount()
                                 : 0);
+        // one slot per global; its own arena, so a bound global keeps only this buffer alive
+        if (globalCount > 0) {
+            var globalsArena = Arena.ofAuto();
+            long globalsSize = (long) globalCount * 8;
+            this.globalsBuffer =
+                    globalsArena
+                            .allocate(globalsSize, 8)
+                            .reinterpret(
+                                    globalsArena, ignored -> NativeFootprint.freed(globalsSize));
+            NativeFootprint.allocated(globalsSize);
+        } else {
+            this.globalsBuffer = MemorySegment.NULL;
+        }
 
         // Allocate args buffer (separate from ctxBuffer, no fixed arg limit)
         this.argsBuffer = arena.allocate((long) CtxBuffer.ARGS_BUFFER_CAPACITY * 8, 8);
@@ -205,7 +220,11 @@ public final class NativeMachine implements Machine {
         this.codeRegionSize = (Math.max(image.length, 1) + PAGE_SIZE - 1) & -PAGE_SIZE;
 
         try {
-            codeRegion = PanamaExecutor.mmapCode(codeRegionSize);
+            codeRegion = PanamaExecutor.mmapReadWrite(codeRegionSize);
+            long size = codeRegionSize + NativeFootprint.MAPPING_COST;
+            // unmapped with the arena; downcalls keep this global view and don't acquire it
+            PanamaExecutor.unmapWith(arena, codeRegion, () -> size);
+            NativeFootprint.allocated(size);
             MemorySegment.copy(MemorySegment.ofArray(image), 0, codeRegion, 0, image.length);
             for (int funcId = 0; funcId < numImports; funcId++) {
                 codeRegion.set(
@@ -242,16 +261,30 @@ public final class NativeMachine implements Machine {
         } catch (Throwable e) {
             throw new WasmEngineException("Failed to set up native code", e);
         }
+    }
 
-        this.nativeMemory = instance.memory() instanceof NativeMemory nm ? nm : null;
-        // An imported memory outlives this instance and may back others, so only
-        // a memory this module defines is ours to close.
-        this.ownsMemory = instance.imports().memoryCount() == 0;
+    /** Binds a global this module defines to its slot, as the instance creates it. */
+    void bindDefinedGlobal(NativeGlobalInstance global) {
+        if (closed) {
+            throw new IllegalStateException("This instance has been closed");
+        }
+        int slot = importGlobalCount + definedGlobalsBound;
+        if (slot >= globalCount) {
+            throw new IllegalStateException(
+                    "A natively compiled instance can only be initialized once");
+        }
+        definedGlobalsBound++;
+        global.bind(globalsBuffer, slot, this);
     }
 
     /** Returns the id that the table entries this machine owns hold. */
     long ownerId() {
         return ownerId;
+    }
+
+    /** Whether a call is running on this machine, on any thread. */
+    boolean isRunning() {
+        return callDepth.get() > 0;
     }
 
     boolean isClosed() {
@@ -263,27 +296,10 @@ public final class NativeMachine implements Machine {
         return instance;
     }
 
+    /** Stops new calls; a call already running finishes. */
     @Override
     public void close() {
-        if (closed) {
-            // munmap below is a native free, so a second close would unmap a
-            // region that may already have been handed back out.
-            return;
-        }
         closed = true;
-        if (nativeMemory != null && ownsMemory) {
-            nativeMemory.close();
-        }
-        try {
-            arena.close();
-        } catch (IllegalStateException e) {
-            // may already be closed
-        }
-        try {
-            PanamaExecutor.munmap(codeRegion, codeRegionSize);
-        } catch (Throwable e) {
-            throw new WasmEngineException("Failed to unmap native code", e);
-        }
     }
 
     @SuppressWarnings("unchecked")
@@ -431,7 +447,7 @@ public final class NativeMachine implements Machine {
             MethodHandle directHandler =
                     MethodHandles.lookup()
                             .bind(
-                                    this,
+                                    upcalls,
                                     "importDispatchDirect",
                                     MethodType.methodType(long.class, int.class));
             directHandler = MethodHandles.insertArguments(directHandler, 0, funcId);
@@ -524,7 +540,7 @@ public final class NativeMachine implements Machine {
             MethodHandle handler =
                     MethodHandles.lookup()
                             .bind(
-                                    this,
+                                    upcalls,
                                     "callIndirectTrampoline",
                                     MethodType.methodType(long.class, long.class));
             var desc = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG);
@@ -593,20 +609,18 @@ public final class NativeMachine implements Machine {
         for (int i = 0; i < argCount; i++) {
             args[i] = argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(i));
         }
-        // One stack budget for the whole chain, or each instance would add its own
-        long stackLimit = ctxBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.STACK_LIMIT);
-        long[] results =
-                owner.getMachine() instanceof NativeMachine ownerMachine
-                        ? ownerMachine.callWithStackLimit(funcId, args, stackLimit)
-                        : owner.getMachine().call(funcId, args);
+        long[] results = owner.getMachine().call(funcId, args);
         refreshMemoryPages();
+        if (results == null || results.length == 0) {
+            return 0L;
+        }
         if (expected.returns().size() > 1) {
             for (int i = 0; i < results.length; i++) {
                 argsBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(i), results[i]);
             }
             return 0L;
         }
-        return results == null || results.length == 0 ? 0L : results[0];
+        return results[0];
     }
 
     private long handleTableOperation(int opCode) {
@@ -616,9 +630,16 @@ public final class NativeMachine implements Machine {
                 int newSize = (int) argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(1));
                 int fillValue = (int) argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(2));
                 int tblIdx = (int) argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(4));
-                nativeTables[tblIdx].fill(oldSize, newSize, fillValue, instance);
-                // Update TableLimits so import validation sees the grown size
-                nativeTables[tblIdx].limits().grow(newSize - oldSize);
+                var table = nativeTables[tblIdx];
+                // compiled code has already grown it, so import validation sees the new size
+                table.limits().grow(newSize - oldSize);
+                try {
+                    table.fill(oldSize, newSize, fillValue, instance);
+                } catch (RuntimeException e) {
+                    // null, so a call through a slot left unwritten traps instead of running
+                    table.fill(oldSize, newSize, Value.REF_NULL_VALUE, instance);
+                    throw e;
+                }
             }
             case -2 -> { // table fill
                 int offset = (int) argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(0));
@@ -652,8 +673,12 @@ public final class NativeMachine implements Machine {
             }
             case -6 -> { // first native table.set into a table
                 int tblIdx = (int) argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(0));
-                nativeTables[tblIdx].registerWriter(this);
-                tableWriters.set(ValueLayout.JAVA_INT, (long) tblIdx * 4, 1);
+                var table = nativeTables[tblIdx];
+                // under the table's lock, so a prune can't drop this machine in between
+                synchronized (table) {
+                    table.registerWriter(this);
+                    tableWriters.set(ValueLayout.JAVA_INT, (long) tblIdx * 4, 1);
+                }
             }
             case -8 -> { // memory.init
                 int segmentId = (int) argsBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.argOffset(0));
@@ -713,7 +738,7 @@ public final class NativeMachine implements Machine {
             MethodHandle handler =
                     MethodHandles.lookup()
                             .bind(
-                                    this,
+                                    upcalls,
                                     "memoryGrowHandler",
                                     MethodType.methodType(long.class, long.class));
             var desc = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG);
@@ -773,7 +798,6 @@ public final class NativeMachine implements Machine {
         if (importGlobalsInitialized || globalCount == 0) {
             return;
         }
-        importGlobalsInitialized = true;
 
         // Module-defined globals are already NativeGlobalInstance (created by globalFactory).
         int importGlobalCount =
@@ -791,56 +815,95 @@ public final class NativeMachine implements Machine {
             if (!(global instanceof NativeGlobalInstance nativeGlobal)) {
                 throw new WasmEngineException(foreignImportMessage("global", global));
             }
-            if (nativeGlobal.isStandalone()) {
-                // Passed in by the host: adopt it, so what this module writes stays
-                // visible through the caller's own object.
-                nativeGlobal.rebind(globalsBuffer, i);
-            } else {
-                // Exported by another module, and already sitting where that
-                // module's compiled code reads it. Its storage cannot move, so this
-                // module starts from its current value.
+            if (!nativeGlobal.adopt(globalsBuffer, i, this)) {
+                // exported by another module or used by an open instance: start from its value
                 globalsBuffer.set(ValueLayout.JAVA_LONG, (long) i * 8, nativeGlobal.getValue());
             }
         }
+        // last, so a foreign global fails every call instead of leaving the rest unset
+        importGlobalsInitialized = true;
     }
 
     private void initializeNativeTables() {
         if (tablesInitialized) {
             return;
         }
-        tablesInitialized = true;
 
         var module = instance.module();
         int importedTableCount = instance.imports().tableCount();
         int definedTableCount = module.tableSection().tableCount();
         int tableCount = importedTableCount + definedTableCount;
 
-        if (tableCount == 0) {
-            this.nativeTables = new NativeTable[0];
-            return;
-        }
-
-        // Instance.table(i) returns NativeTable (created by tableFactory).
-        // Just collect references and build the pointer array.
-        this.nativeTables = new NativeTable[tableCount];
-        this.tablePtrsArray = arena.allocate((long) tableCount * 8, 8);
-        this.tableWriters = arena.allocate((long) tableCount * 4, 4).fill((byte) 0);
-
+        // checked first, so a call that fails here leaves nothing half set up for the next
+        var tables = new NativeTable[tableCount];
         for (int i = 0; i < tableCount; i++) {
             var table = instance.table(i);
-            if (table instanceof NativeTable nt) {
-                nt.resolvePendingRefs(instance);
-                nativeTables[i] = nt;
-            } else {
+            if (!(table instanceof NativeTable nt)) {
                 throw new WasmEngineException(foreignImportMessage("table", table));
             }
-
-            tablePtrsArray.set(
-                    ValueLayout.JAVA_LONG, (long) i * 8, nativeTables[i].nativeBuffer().address());
+            tables[i] = nt;
         }
 
-        ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.TABLE_PTRS, tablePtrsArray.address());
-        ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.TABLE_WRITERS_PTR, tableWriters.address());
+        if (tableCount > 0 && tablePtrsArray.byteSize() == 0) {
+            this.tablePtrsArray = arena.allocate((long) tableCount * 8, 8);
+            this.tableWriters = arena.allocate((long) tableCount * 4, 4).fill((byte) 0);
+        }
+        for (int i = 0; i < tableCount; i++) {
+            tables[i].resolvePendingRefs(instance);
+            tablePtrsArray.set(
+                    ValueLayout.JAVA_LONG, (long) i * 8, tables[i].nativeBuffer().address());
+        }
+        this.nativeTables = tables;
+        if (tableCount > 0) {
+            ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.TABLE_PTRS, tablePtrsArray.address());
+            ctxBuffer.set(
+                    ValueLayout.JAVA_LONG, CtxBuffer.TABLE_WRITERS_PTR, tableWriters.address());
+        }
+        tablesInitialized = true;
+    }
+
+    /** Clears the flag that stops native table.set registering this machine with {@code table}. */
+    void forgetTableWriter(NativeTable table) {
+        var tables = nativeTables;
+        if (tables == null) {
+            return;
+        }
+        for (int i = 0; i < tables.length; i++) {
+            if (tables[i] == table) {
+                tableWriters.set(ValueLayout.JAVA_INT, (long) i * 4, 0);
+            }
+        }
+    }
+
+    /** What the upcall stubs call. Stubs are rooted globally, so this holds the machine weakly. */
+    @SuppressWarnings("unused") // called through method handles
+    private static final class Upcalls {
+        private final WeakReference<NativeMachine> machine;
+
+        Upcalls(NativeMachine machine) {
+            this.machine = new WeakReference<>(machine);
+        }
+
+        // 0 when the machine is gone, which no running code can observe
+        long importDispatchDirect(int funcId) {
+            var m = machine.get();
+            return m == null ? 0L : m.importDispatchDirect(funcId);
+        }
+
+        long callIndirectTrampoline(long ctxAddr) {
+            var m = machine.get();
+            return m == null ? 0L : m.callIndirectTrampoline(ctxAddr);
+        }
+
+        long memoryGrowHandler(long ctxAddr) {
+            var m = machine.get();
+            return m == null ? -1L : m.memoryGrowHandler(ctxAddr);
+        }
+    }
+
+    /** Returns how many functions, imported and defined, this machine's function table holds. */
+    int functionCount() {
+        return (int) (funcTable.byteSize() / 8);
     }
 
     /** Package-private: used by NativeTable to resolve funcId → funcPtr across modules. */
@@ -932,13 +995,7 @@ public final class NativeMachine implements Machine {
 
     @Override
     public long[] call(int funcId, long[] args) throws WasmEngineException {
-        return callWithStackLimit(funcId, args, 0L);
-    }
-
-    /** Calls with the stack limit an outermost call starts from, 0 to anchor a new one. */
-    private long[] callWithStackLimit(int funcId, long[] args, long stackLimit) {
         if (closed) {
-            // Its native code and buffers are gone, but a table may still hold its functions
             throw new WasmEngineException("instance is closed");
         }
         if (funcId < numImports) {
@@ -952,8 +1009,14 @@ public final class NativeMachine implements Machine {
             throw new WasmEngineException("Function " + funcId + " not compiled");
         }
 
+        boolean outermostCall = callDepth.incrementAndGet() == 1;
+        // a nested instance shares the stack budget of the one running on this thread
+        NativeMachine outer = null;
+        if (outermostCall) {
+            outer = RUNNING.get();
+            RUNNING.set(this);
+        }
         try {
-            boolean outermostCall = callDepth++ == 0;
             var funcType = (FunctionType) instance.type(instance.functionType(funcId));
 
             initializeImportGlobals();
@@ -964,13 +1027,17 @@ public final class NativeMachine implements Machine {
             // against where the outer call began, or every level moves the
             // limit deeper and the guard stops firing.
             if (outermostCall) {
-                ctxBuffer.set(ValueLayout.JAVA_LONG, CtxBuffer.STACK_LIMIT, stackLimit);
+                ctxBuffer.set(
+                        ValueLayout.JAVA_LONG,
+                        CtxBuffer.STACK_LIMIT,
+                        outer == null ? 0L : outer.stackLimit());
             }
 
             if (!memBaseInitialized) {
                 var mem = instance.memory();
                 if (mem instanceof NativeMemory nativeMemory) {
-                    cachedMemBase = nativeMemory.nativeAddress();
+                    // an unscoped view, so calls don't acquire the memory's arena
+                    cachedMemBase = MemorySegment.ofAddress(nativeMemory.nativeAddress().address());
                     ctxBuffer.set(
                             ValueLayout.JAVA_LONG,
                             CtxBuffer.MEM_BASE_ADDR,
@@ -1048,12 +1115,22 @@ public final class NativeMachine implements Machine {
             sneakyThrow(e);
             throw new AssertionError("unreachable");
         } finally {
-            callDepth--;
-            // Prevent the JIT from considering this machine unreachable during
-            // the native call, which would let GC collect and close() free
-            // native memory while code is executing.
+            if (outermostCall) {
+                if (outer == null) {
+                    RUNNING.remove();
+                } else {
+                    RUNNING.set(outer);
+                }
+            }
+            callDepth.decrementAndGet();
+            // the upcall stubs hold this machine weakly, so keep it for the whole native call
             Reference.reachabilityFence(this);
         }
+    }
+
+    // anchored at the outermost call's entry, then shared by everything nested in it
+    private long stackLimit() {
+        return ctxBuffer.get(ValueLayout.JAVA_LONG, CtxBuffer.STACK_LIMIT);
     }
 
     private void raiseInterruptFlag() {

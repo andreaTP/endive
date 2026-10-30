@@ -13,7 +13,7 @@ import java.nio.ByteBuffer;
  * <p>Format:
  * <pre>
  *   [4 bytes: magic "CL4J"]
- *   [4 bytes: version (3)]
+ *   [4 bytes: version]
  *   [modified UTF-8: target triple]
  *   [4 bytes: image length]
  *   [N bytes: image]
@@ -30,7 +30,7 @@ import java.nio.ByteBuffer;
 public final class NativeCodeSerializer {
 
     private static final int MAGIC = 0x434C344A; // "CL4J"
-    private static final int VERSION = 4;
+    static final int VERSION = 5;
 
     private NativeCodeSerializer() {}
 
@@ -63,7 +63,12 @@ public final class NativeCodeSerializer {
         }
         int version = dis.readInt();
         if (version != VERSION) {
-            throw new IOException("Unsupported native code version: " + version);
+            throw new IOException(
+                    "Native code version "
+                            + version
+                            + " is not supported, this Redline reads version "
+                            + VERSION
+                            + ": compile the module again");
         }
         String triple = dis.readUTF();
         byte[] image = readBytes(dis, readCount(dis, "image length"), "image");

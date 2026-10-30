@@ -55,8 +55,7 @@ public class NativeCodeSerializerTest {
 
     @Test
     public void anOlderVersionIsRejected() throws IOException {
-        // Version 3 code reads 16-byte table entries
-        for (int version = 1; version <= 3; version++) {
+        for (int version = 1; version < NativeCodeSerializer.VERSION; version++) {
             var out = new ByteArrayOutputStream();
             var dos = new DataOutputStream(out);
             dos.writeInt(0x434C344A);

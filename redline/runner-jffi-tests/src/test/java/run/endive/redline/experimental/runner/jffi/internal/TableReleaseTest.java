@@ -1,8 +1,10 @@
 package run.endive.redline.experimental.runner.jffi.internal;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.ref.WeakReference;
 import org.junit.jupiter.api.Test;
 import run.endive.corpus.CorpusResources;
 import run.endive.redline.experimental.api.internal.RedlineTarget;
@@ -17,26 +19,25 @@ import run.endive.wasm.types.TableLimits;
 import run.endive.wasm.types.ValType;
 import run.endive.wasm.types.Value;
 
-/**
- * A table's buffer is off-heap, so the garbage collector never reclaims it and
- * closing the instance has to. Which tables that covers is the whole question: one
- * the module declares belongs to the instance, and one it borrowed through an
- * import belongs to whoever created it and may still back something else.
- */
+/** A table is freed once nothing reaches it, never while someone else holds it. */
 public class TableReleaseTest {
 
     @Test
-    public void closingReleasesATableTheModuleDeclares() {
-        var module = Parser.parse(CorpusResources.getResource("compiled/big-table.wat.wasm"));
-
-        JffiNativeTable table;
-        try (var instance = build(module, null)) {
-            instance.export("noop").apply();
-            table = (JffiNativeTable) instance.table(0);
-            assertFalse(table.isFreed(), "still in use");
+    public void aTableTheModuleDeclaresIsReleasedWithItsInstance() throws InterruptedException {
+        var table = declaredTableOfADroppedInstance();
+        long deadline = System.nanoTime() + SECONDS.toNanos(30);
+        while (table.get() != null) {
+            assertTrue(System.nanoTime() < deadline, "the table is still reachable");
+            System.gc();
+            Thread.sleep(10);
         }
+    }
 
-        assertTrue(table.isFreed(), "a table the module declares dies with the instance");
+    private static WeakReference<JffiNativeTable> declaredTableOfADroppedInstance() {
+        var module = Parser.parse(CorpusResources.getResource("compiled/big-table.wat.wasm"));
+        // no call first: the table belongs to the instance whether or not it ever ran
+        var instance = build(module, null);
+        return new WeakReference<>((JffiNativeTable) instance.table(0));
     }
 
     @Test
@@ -55,10 +56,8 @@ public class TableReleaseTest {
             instance.export("noop").apply();
         }
 
-        assertFalse(
-                borrowed.isFreed(),
-                "an imported table belongs to its creator and may back other instances");
-        borrowed.free();
+        assertEquals(4, borrowed.size(), "an imported table belongs to whoever holds it");
+        assertEquals(Value.REF_NULL_VALUE, borrowed.ref(0));
     }
 
     private static run.endive.runtime.Instance build(WasmModule module, ImportValues imports) {

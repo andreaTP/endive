@@ -128,6 +128,25 @@ try (var instance = MyModule.builder().build()) {
 }
 ```
 
+## Native memory
+
+A natively compiled instance keeps its code, linear memory and tables outside the Java heap. The
+garbage collector frees them once nothing references them, so closing an instance is optional. A
+memory, table or global keeps working for as long as you hold it, even after the instance that
+made it is closed or gone. A table also keeps alive the instances whose functions it holds, and
+may keep some for a while after their entries are overwritten.
+
+- `close()` stops the instance and never throws: later calls throw `WasmEngineException`, while a
+  call already running finishes.
+- The garbage collector doesn't see native memory, so Redline asks for a collection as the native
+  memory it holds grows. `-Dendive.redline.gcThreshold=<bytes>` sets the least growth between two
+  requests. They are `System.gc()` calls: `-XX:+DisableExplicitGC` turns them off, and with G1,
+  `-XX:+ExplicitGCInvokesConcurrent` makes them concurrent.
+- A memory reserves address space up front, a large range when it declares no maximum. Under an
+  address-space limit such as `ulimit -v`, declare a maximum.
+- A mutable global the host creates is shared live with one instance at a time: an instance that
+  imports it while another one still uses it starts from a copy of its value.
+
 ## Falling back
 
 When native code cannot be used, `builder()` falls back to the bytecode produced by the

@@ -7,8 +7,10 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.Arrays;
 import run.endive.redline.experimental.api.internal.CtxBuffer;
+import run.endive.redline.experimental.api.internal.NativeFootprint;
 import run.endive.runtime.Instance;
 import run.endive.runtime.TableInstance;
+import run.endive.runtime.TrapException;
 import run.endive.wasm.UninstantiableException;
 import run.endive.wasm.WasmEngineException;
 import run.endive.wasm.types.Table;
@@ -35,7 +37,8 @@ import run.endive.wasm.types.ValType;
  * calls an entry directly only from the owner's instance. The table keeps every
  * native instance whose id its entries hold, see {@link #writers}. An entry
  * owned by an instance without native code has no pointer and no owner id; its
- * owner is kept in {@link #owners} instead.
+ * owner is kept in {@link #owners} instead. Like any Wasm table, it must not be
+ * written from two threads at once.
  *
  * <p>The entries array is pre-allocated to the table's max capacity so that
  * {@code TABLE.GROW} only bumps the size field without reallocation.
@@ -45,6 +48,8 @@ import run.endive.wasm.types.ValType;
  * <p>Resolution of funcId → funcPtr+typeIdx uses the {@code instance} parameter
  * passed to {@link #setRef}, obtaining the calling module's NativeMachine.
  * This ensures cross-module shared tables resolve to the correct native addresses.
+ *
+ * <p>The buffer is freed once nothing reaches the table.
  */
 public final class NativeTable extends TableInstance {
 
@@ -67,20 +72,35 @@ public final class NativeTable extends TableInstance {
     private int pruneAt = 8;
     private volatile NativeMachine lastWriter;
 
-    public NativeTable(Table table, int initValue, Arena arena) {
+    public NativeTable(Table table, int initValue) {
         super(table, initValue);
         this.isExternRef = table.elementType().equals(ValType.ExternRef);
         int initial = (int) table.limits().min();
-        int max = (int) table.limits().max();
+        long max = table.limits().max();
         // Pre-allocate to max, capped at MAX_PREALLOC
-        this.capacity = (max > 0 && max <= MAX_PREALLOC) ? max : Math.max(initial, MAX_PREALLOC);
+        this.capacity = max <= MAX_PREALLOC ? (int) max : Math.max(initial, MAX_PREALLOC);
         long bufferSize =
                 CtxBuffer.TABLE_ENTRIES_OFFSET + (long) capacity * CtxBuffer.TABLE_ENTRY_SIZE;
-        this.buffer = arena.allocate(bufferSize, 8);
+        var arena = Arena.ofAuto();
+        // the entries in use at first; growth isn't counted
+        long charged =
+                NativeFootprint.MAPPING_COST
+                        + CtxBuffer.TABLE_ENTRIES_OFFSET
+                        + (long) initial * CtxBuffer.TABLE_ENTRY_SIZE;
+        try {
+            // mapped rather than allocated, so only the entries in use take physical memory
+            this.buffer =
+                    PanamaExecutor.unmapWith(
+                            arena, PanamaExecutor.mmapReadWrite(bufferSize), () -> charged);
+        } catch (Throwable e) {
+            throw new WasmEngineException("Failed to map a table of " + capacity + " entries", e);
+        }
+        NativeFootprint.allocated(charged);
 
         // Write header
         buffer.set(ValueLayout.JAVA_INT, CtxBuffer.TABLE_SIZE_OFFSET, initial);
-        buffer.set(ValueLayout.JAVA_INT, CtxBuffer.TABLE_MAX_OFFSET, max > 0 ? max : capacity);
+        // compiled table.grow checks only this, so it must not exceed the buffer
+        buffer.set(ValueLayout.JAVA_INT, CtxBuffer.TABLE_MAX_OFFSET, (int) Math.min(max, capacity));
 
         // Only the entries below size are reachable: every access bounds-checks
         // against the size field, and grow fills the slots it exposes. Filling
@@ -137,6 +157,10 @@ public final class NativeTable extends TableInstance {
         buffer.set(ValueLayout.JAVA_LONG, base + CtxBuffer.ENTRY_OWNER_ID_OFFSET, ownerId);
     }
 
+    private int funcIdAt(int index) {
+        return buffer.get(ValueLayout.JAVA_INT, entryBase(index) + CtxBuffer.ENTRY_FUNC_ID_OFFSET);
+    }
+
     private long ownerId(int index) {
         return buffer.get(
                 ValueLayout.JAVA_LONG, entryBase(index) + CtxBuffer.ENTRY_OWNER_ID_OFFSET);
@@ -166,15 +190,22 @@ public final class NativeTable extends TableInstance {
      * @param owner the open native machine that defines the function
      */
     private void writeResolvedEntry(int index, int funcId, NativeMachine owner) {
+        if (funcId < 0 || funcId >= owner.functionCount()) {
+            // a funcref from another instance can carry an id outside this one's functions
+            throw new TrapException("undefined element");
+        }
         long funcPtr = owner.getFuncTable().get(ValueLayout.JAVA_LONG, (long) funcId * 8);
         if (funcPtr == 0L) {
             // Not compiled, so only the owner's runner can report it
             writeUnresolvedEntry(index, funcId, owner.instance());
             return;
         }
-        registerWriter(owner);
         int typeIdx = owner.getFuncTypesArray().get(ValueLayout.JAVA_INT, (long) funcId * 4);
-        writeEntry(index, typeIdx, funcId, funcPtr, owner.ownerId());
+        // together, so a prune can't drop the owner before the entry names it
+        synchronized (this) {
+            registerWriter(owner);
+            writeEntry(index, typeIdx, funcId, funcPtr, owner.ownerId());
+        }
         setOwner(index, null);
     }
 
@@ -255,21 +286,17 @@ public final class NativeTable extends TableInstance {
         }
     }
 
-    // Drops closed writers that no entry refers to any more
+    // Drops writers no entry refers to any more, so the table stops keeping them alive
     private void pruneWriters() {
         NativeMachine[] current = writers;
         boolean[] keep = new boolean[current.length];
-        boolean anyClosed = false;
-        for (int w = 0; w < current.length; w++) {
-            keep[w] = !current[w].isClosed();
-            anyClosed |= !keep[w];
-        }
-        if (!anyClosed) {
-            return;
-        }
         int sz = size();
         for (int i = 0; i < sz; i++) {
             long id = ownerId(i);
+            if (id != 0L || funcIdAt(i) == REF_NULL_VALUE) {
+                // native writes don't clear it, and it would keep its instance alive
+                setOwner(i, null);
+            }
             if (id != 0L) {
                 for (int w = 0; w < current.length; w++) {
                     if (current[w].ownerId() == id) {
@@ -279,11 +306,18 @@ public final class NativeTable extends TableInstance {
                 }
             }
         }
+        for (int w = 0; w < current.length; w++) {
+            // a running machine may be between checking its flag and writing an entry
+            keep[w] |= current[w].isRunning();
+        }
         NativeMachine[] kept = new NativeMachine[current.length];
         int count = 0;
         for (int w = 0; w < current.length; w++) {
             if (keep[w]) {
                 kept[count++] = current[w];
+            } else {
+                // its next native table.set registers it again
+                current[w].forgetTableWriter(this);
             }
         }
         writers = Arrays.copyOf(kept, count);
@@ -399,11 +433,11 @@ public final class NativeTable extends TableInstance {
     @Override
     public int grow(int delta, int value, Instance instance) {
         int oldSize = size();
-        int newSize = oldSize + delta;
         int max = buffer.get(ValueLayout.JAVA_INT, CtxBuffer.TABLE_MAX_OFFSET);
-        if (delta < 0 || newSize > max || newSize > capacity) {
+        if (delta < 0 || delta > Math.min(max, capacity) - oldSize) {
             return -1;
         }
+        int newSize = oldSize + delta;
         fill(oldSize, newSize, value, instance);
         // Update size
         buffer.set(ValueLayout.JAVA_INT, CtxBuffer.TABLE_SIZE_OFFSET, newSize);
