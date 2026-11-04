@@ -31,60 +31,83 @@ public final class WasiTestRunner {
             Map<String, String> env,
             int exitCode,
             Optional<String> stdout) {
-
         try (FileSystem fs =
                 ZeroFs.newFileSystem(
                         Configuration.unix().toBuilder().setAttributeViews("unix").build())) {
-
-            var stdoutStream = new MockPrintStream();
-            var stderrStream = new MockPrintStream();
-
-            List<String> allArgs = new ArrayList<>();
-            allArgs.add("test");
-            allArgs.addAll(args);
-
-            WasiOptions.Builder options =
-                    WasiOptions.builder()
-                            .withStdout(stdoutStream)
-                            .withStderr(stderrStream)
-                            .withArguments(allArgs);
-
-            env.forEach(options::withEnvironment);
-            // TODO: dangling filesystem is not supported
-            if (!test.getName().contains("environ")) {
-                options.withEnvironment("NO_DANGLING_FILESYSTEM", "true");
-            }
-
-            if (root.isPresent()) {
-                Path source = test.getParentFile().toPath().resolve(root.get());
-                Path target = fs.getPath("/");
-                copyDirectory(source, target);
-                options.withDirectory("/", target);
-            }
-
-            int actualExitCode;
-            try {
-                actualExitCode = execute(test, options.build());
-            } catch (WasiExitException e) {
-                actualExitCode = e.exitCode();
-            } catch (RuntimeException e) {
-                String message = "Failed to execute test: " + test;
-                if (!stdoutStream.output().isEmpty() || !stderrStream.output().isEmpty()) {
-                    message += "\n<<<<<\n";
-                    message += (stdoutStream.output() + stderrStream.output()).strip();
-                    message += "\n>>>>>";
-                }
-                throw new RuntimeException(message, e);
-            }
-
-            assertEquals(exitCode, actualExitCode, "exit code");
-            stdout.ifPresent(expected -> assertEquals(expected, stdoutStream.output(), "stdout"));
+            run(test, args, root, fs.getPath("/"), env, exitCode, stdout);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
 
-    private static int execute(File test, WasiOptions wasiOptions) {
+    public static void executeOnHost(
+            Path tempDir,
+            File test,
+            List<String> args,
+            Optional<String> root,
+            Map<String, String> env,
+            int exitCode,
+            Optional<String> stdout) {
+        run(test, args, root, tempDir.resolve("root"), env, exitCode, stdout);
+    }
+
+    private static void run(
+            File test,
+            List<String> args,
+            Optional<String> root,
+            Path target,
+            Map<String, String> env,
+            int exitCode,
+            Optional<String> stdout) {
+        var stdoutStream = new MockPrintStream();
+        var stderrStream = new MockPrintStream();
+
+        List<String> allArgs = new ArrayList<>();
+        allArgs.add("test");
+        allArgs.addAll(args);
+
+        WasiOptions.Builder options =
+                WasiOptions.builder()
+                        .withStdout(stdoutStream)
+                        .withStderr(stderrStream)
+                        .withArguments(allArgs);
+
+        env.forEach(options::withEnvironment);
+        // TODO: dangling filesystem is not supported
+        if (!test.getName().contains("environ")) {
+            options.withEnvironment("NO_DANGLING_FILESYSTEM", "true");
+        }
+
+        if (root.isPresent()) {
+            Path source = test.getParentFile().toPath().resolve(root.get());
+            try {
+                copyDirectory(source, target);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            options.withDirectory("/", target);
+        }
+
+        int actualExitCode;
+        try {
+            actualExitCode = runModule(test, options.build());
+        } catch (WasiExitException e) {
+            actualExitCode = e.exitCode();
+        } catch (RuntimeException e) {
+            String message = "Failed to execute test: " + test;
+            if (!stdoutStream.output().isEmpty() || !stderrStream.output().isEmpty()) {
+                message += "\n<<<<<\n";
+                message += (stdoutStream.output() + stderrStream.output()).strip();
+                message += "\n>>>>>";
+            }
+            throw new RuntimeException(message, e);
+        }
+
+        assertEquals(exitCode, actualExitCode, "exit code");
+        stdout.ifPresent(expected -> assertEquals(expected, stdoutStream.output(), "stdout"));
+    }
+
+    private static int runModule(File test, WasiOptions wasiOptions) {
         try (var wasi =
                 WasiPreview1.builder().withLogger(LOGGER).withOptions(wasiOptions).build()) {
             Instance.builder(Parser.parse(test))

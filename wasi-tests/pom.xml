@@ -115,6 +115,15 @@
               <goal>wasi-test-gen</goal>
             </goals>
           </execution>
+          <execution>
+            <id>host</id>
+            <goals>
+              <goal>wasi-test-gen</goal>
+            </goals>
+            <configuration>
+              <hostFileSystem>true</hostFileSystem>
+            </configuration>
+          </execution>
         </executions>
       </plugin>
     </plugins>
